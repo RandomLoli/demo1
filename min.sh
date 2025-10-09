@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 set -e
 
 # === КОНФИГУРАЦИЯ ===
@@ -6,153 +6,75 @@ POOL_ETC="stratum+tcp://gate.emcd.network:7878"
 POOL_KAS="stratum+tcp://gate.emcd.network:9999"
 WALLET="grammymurr.worker"
 
-# 🔑 Замените на ваши данные!
-TELEGRAM_BOT_TOKEN="5542234668:AAFO7fjjd0w7q7j-lUaYAY9u_dIAIldzhg0"
-TELEGRAM_CHAT_ID="5336452267"
+# Работаем в папке скрипта
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 
 HOSTNAME=$(hostname)
 IP=$(hostname -I | awk '{print $1}')
+echo "🚀 Запуск майнинга на $HOSTNAME ($IP)"
 
-send_telegram() {
-    local msg="$1"
-    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-        -d "chat_id=$TELEGRAM_CHAT_ID" \
-        -d "text=$msg" \
-        -d "parse_mode=HTML" > /dev/null
-}
-
-echo "🚀 Начинаю развёртывание майнинга на $HOSTNAME ($IP)"
-send_telegram "⛏️ <b>Запуск майнинга</b> на $HOSTNAME ($IP)..."
-
-# === 1. KASPA (CPU) ===
-KAS_DIR="$HOME/kaspa-miner"
-mkdir -p "$KAS_DIR"
-cd "$KAS_DIR"
-
-echo "📦 Скачиваю Kaspa-майнер (Linux)..."
-# -L: следовать редиректам (обязательно для GitHub Releases)
-# -O: явно задать имя файла
-wget -q -L -O kaspa.tgz "https://github.com/tmrlvi/kaspa-miner/releases/download/v0.2.1-GPU-0.7/kaspa-miner-v0.2.1-GPU-0.7-default-linux-gnu-amd64.tgz"
-
-# Проверяем, что файл не пустой
-if [ ! -s kaspa.tgz ]; then
-    echo "❌ Ошибка: архив пустой или не скачался!"
-    exit 1
-fi
-
-echo "📦 Распаковываю архив..."
-tar -xf kaspa.tgz
-
-echo "🔍 Ищу kaspa-miner..."
-# Ищем рекурсивно
-KAS_BIN=$(find . -type f -name "kaspa-miner" 2>/dev/null | head -n1)
-
-if [ -z "$KAS_BIN" ]; then
-    echo "❌ kaspa-miner не найден. Содержимое архива:"
-    tar -tf kaspa.tgz
-    exit 1
-fi
-
-echo "✅ Найден: $KAS_BIN"
-cp "$KAS_BIN" ./kaspa-miner
-chmod +x kaspa-miner
-echo "✅ Kaspa-майнер готов."
-# Копируем в корень KAS_DIR и делаем исполняемым
-cp "$KAS_BIN" ./kaspa-miner
-chmod +x kaspa-miner
-
-# Проверяем, что бинарник запускается
-./kaspa-miner --help > /dev/null || { echo "❌ Ошибка: бинарник несовместим"; exit 1; }
-
-cat > start.sh <<EOF
-#!/bin/bash
-cd "$KAS_DIR"
-./kaspa-miner --pool $POOL_KAS --user $WALLET --threads \$(nproc)
-EOF
-chmod +x start.sh
-
-# Systemd сервис
-cat > /tmp/kaspa-miner.service <<EOF
+# === ФУНКЦИЯ: установка systemd-сервиса ===
+setup_service() {
+    NAME="$1"
+    START_CMD="$2"
+    cat > "/tmp/${NAME}.service" <<EOF
 [Unit]
-Description=Kaspa Miner (CPU)
+Description=$NAME Miner
 After=network.target
 
 [Service]
 Type=simple
 User=$USER
-WorkingDirectory=$KAS_DIR
-ExecStart=$KAS_DIR/start.sh
+WorkingDirectory=$SCRIPT_DIR
+ExecStart=$START_CMD
 Restart=always
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 EOF
+    sudo mv "/tmp/${NAME}.service" "/etc/systemd/system/"
+    sudo systemctl daemon-reload
+    sudo systemctl enable "$NAME.service"
+    sudo systemctl restart "$NAME.service"
+}
 
-sudo mv /tmp/kaspa-miner.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable kaspa-miner
-sudo systemctl restart kaspa-miner
+# === 1. KASPA (CPU) ===
+echo "📦 Устанавливаю Kaspa (CPU)..."
+if [ ! -f kaspa-miner ]; then
+    wget -q -L -O kaspa.tgz "https://github.com/tmrlvi/kaspa-miner/releases/download/v0.2.1-GPU-0.7/kaspa-miner-v0.2.1-GPU-0.7-default-linux-gnu-amd64.tgz"
+    [ -s kaspa.tgz ] || { echo "❌ Kaspa: архив не скачался"; exit 1; }
+    tar -xf kaspa.tgz
+    KAS_BIN=$(find . -type f -name "kaspa-miner" | head -n1)
+    [ -n "$KAS_BIN" ] || { echo "❌ Kaspa: бинарник не найден"; exit 1; }
+    cp "$KAS_BIN" ./kaspa-miner
+    chmod +x kaspa-miner
+fi
 
-KAS_OK="✅ Kaspa — запущен (CPU)"
+setup_service "kaspa-miner" "./kaspa-miner --pool $POOL_KAS --user $WALLET --threads \$(nproc)"
 
-# === 2. ETC (GPU, через lolMiner v1.98) ===
+# === 2. ETC (GPU) ===
 GPU_FOUND=false
-if command -v nvidia-smi >/dev/null 2>&1 || (lspci | grep -iE 'vga|amd|ati' > /dev/null); then
+if command -v nvidia-smi >/dev/null 2>&1 || (lspci | grep -iE 'vga|3d|amd|ati' >/dev/null); then
     GPU_FOUND=true
 fi
 
-ETC_OK=""
 if [ "$GPU_FOUND" = true ]; then
-    ETC_DIR="$HOME/etc-miner"
-    mkdir -p "$ETC_DIR"
-    cd "$ETC_DIR"
-
-    echo "🎮 GPU обнаружен — устанавливаю lolMiner 1.98..."
-    wget -q https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98/lolMiner_v1.98_Lin64.tar.gz
-    tar -xf lolMiner_v1.98_Lin64.tar.gz
-    mv 1.98/lolMiner ./
-    chmod +x lolMiner
-
-    cat > start.sh <<EOF
-#!/bin/bash
-cd "$ETC_DIR"
-./lolMiner --algo ETCHASH --pool $POOL_ETC --user $WALLET --apiport 4444
-EOF
-    chmod +x start.sh
-
-    cat > /tmp/etc-miner.service <<EOF
-[Unit]
-Description=ETC Miner (GPU)
-After=network.target
-
-[Service]
-Type=simple
-User=$USER
-WorkingDirectory=$ETC_DIR
-ExecStart=$ETC_DIR/start.sh
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    sudo mv /tmp/etc-miner.service /etc/systemd/system/
-    sudo systemctl daemon-reload
-    sudo systemctl enable etc-miner
-    sudo systemctl restart etc-miner
-
-    ETC_OK="✅ ETC — запущен (GPU)"
+    echo "🎮 Устанавливаю ETC (GPU)..."
+    if [ ! -f lolMiner ]; then
+        wget -q -O lolMiner.tar.gz "https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98/lolMiner_v1.98_Lin64.tar.gz"
+        [ -s lolMiner.tar.gz ] || { echo "❌ ETC: архив не скачался"; exit 1; }
+        tar -xf lolMiner.tar.gz
+        mv 1.98/lolMiner ./
+        chmod +x lolMiner
+    fi
+    setup_service "etc-miner" "./lolMiner --algo ETCHASH --pool $POOL_ETC --user $WALLET --apiport 4444"
 else
-    ETC_OK="⚠️ GPU не найден — ETC пропущен"
+    echo "⚠️ GPU не найден — ETC пропущен"
 fi
 
-# === Уведомление в Telegram ===
-send_telegram "✅ <b>Майнинг активен</b> на $HOSTNAME ($IP)
-
-$KAS_OK
-$ETC_OK
-
-🕒 $(date '+%Y-%m-%d %H:%M:%S')"
-echo "✅ Готово! Проверьте Telegram."
+echo "✅ Майнинг настроен! Сервисы:"
+echo "   sudo systemctl status kaspa-miner"
+[ "$GPU_FOUND" = true ] && echo "   sudo systemctl status etc-miner"
+echo "   Логи: journalctl -u kaspa-miner -f"
