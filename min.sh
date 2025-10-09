@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Конфигурация для Kryptex (замените на свои данные!)
-KRIPTEX_USERNAME="krxX3PVQVR"  # Ваш имейл или имя пользователя на Kryptex
-WORKER_NAME="worker"            # Имя воркера, которое вы увидите в статистике
+# Конфигурация для Kryptex
+KRIPTEX_USERNAME="krxX3PVQVR"  # ЗАМЕНИТЕ на ваш логин Kryptex
+WORKER_NAME="worker"            # Имя воркера
 
 # Пул и порты Kryptex
 ETC_POOL="etc.kryptex.network:7033"
@@ -23,9 +23,11 @@ check_root() {
 install_dependencies() {
     echo "📦 Проверяю и устанавливаю зависимости..."
     if ! command -v wget &> /dev/null; then
+        echo "📥 Устанавливаю wget..."
         apt-get update && apt-get install -y wget
     fi
     if ! command -v crontab &> /dev/null; then
+        echo "📥 Устанавливаю cron..."
         apt-get update && apt-get install -y cron
     fi
 }
@@ -54,7 +56,7 @@ EOF
     fi
 }
 
-# Установка XMRig для Monero (CPU) - ИСПРАВЛЕННАЯ ВЕРСИЯ
+# Установка XMRig для Monero (CPU) - с исправленными параметрами:cite[10]
 install_xmr_miner() {
     echo "📥 Устанавливаю XMRig для Monero..."
     mkdir -p /opt/mining/xmr
@@ -65,11 +67,11 @@ install_xmr_miner() {
         tar -xzf xmrig-*-linux-x64.tar.gz --strip-components=1
         rm -f xmrig-*-linux-x64.tar.gz
 
-        # ИСПРАВЛЕННЫЙ скрипт запуска для XMR (без --algorithm)
+        # Исправленный скрипт запуска для XMR:cite[10]
         cat > /opt/mining/xmr/start_xmr_miner.sh << EOF
 #!/bin/bash
 cd /opt/mining/xmr
-./xmrig -o $XMR_POOL -u $XMR_USERNAME -p x
+./xmrig -o $XMR_POOL -u $XMR_USERNAME -p x --randomx-1gb-pages
 EOF
         chmod +x /opt/mining/xmr/start_xmr_miner.sh
         echo "✅ XMRig для Monero установлен и настроен"
@@ -79,14 +81,15 @@ EOF
     fi
 }
 
+# Настройка автозапуска через cron:cite[10]
 setup_autostart() {
     echo "⏰ Настраиваю автозапуск через cron..."
-    # Добавляем задания в crontab для автозапуска при загрузке
     (crontab -l 2>/dev/null | grep -v "/opt/mining/etc/start_etc_miner.sh"; echo "@reboot /opt/mining/etc/start_etc_miner.sh > /var/log/etc-miner.log 2>&1 &") | crontab -
     (crontab -l 2>/dev/null | grep -v "/opt/mining/xmr/start_xmr_miner.sh"; echo "@reboot /opt/mining/xmr/start_xmr_miner.sh > /var/log/xmr-miner.log 2>&1 &") | crontab -
     echo "✅ Автозапуск через cron настроен"
 }
 
+# Создание утилит управления
 create_management_tools() {
     echo "🔧 Создаю утилиты управления..."
 
@@ -131,54 +134,20 @@ echo "=== Логи XMR (последние 3 строки) ==="
 tail -3 /var/log/xmr-miner.log 2>/dev/null || echo "Лог XMR пуст или отсутствует"
 EOF
 
-    mkdir -p /var/run/mining
     chmod +x /usr/local/bin/start-mining.sh /usr/local/bin/stop-mining.sh /usr/local/bin/mining-status.sh
     echo "✅ Утилиты управления созданы"
 }
 
-# Функция для исправления XMR майнера
-fix_xmr_miner() {
-    echo "🔧 Исправляю XMR майнер..."
-    cd /opt/mining/xmr
-    
-    # Останавливаем текущий XMR майнер
-    pkill -f xmrig
-    sleep 2
-    
-    # Обновляем скрипт запуска с правильными параметрами
-    cat > start_xmr_miner.sh << EOF
-#!/bin/bash
-cd /opt/mining/xmr
-./xmrig -o $XMR_POOL -u $XMR_USERNAME -p x
-EOF
-    chmod +x start_xmr_miner.sh
-    echo "✅ XMR майнер исправлен"
-}
-
+# Главная функция
 main() {
     check_root
-    
-    echo "Выберите действие:"
-    echo "1 - Полная установка майнеров"
-    echo "2 - Только исправить XMR майнер"
-    read -p "Введите номер [1-2]: " choice
-    
-    case $choice in
-        1)
-            install_dependencies
-            install_etc_miner
-            install_xmr_miner
-            setup_autostart
-            create_management_tools
-            ;;
-        2)
-            fix_xmr_miner
-            ;;
-        *)
-            echo "❌ Неверный выбор"
-            exit 1
-            ;;
-    esac
+    install_dependencies
+
+    install_etc_miner
+    install_xmr_miner
+
+    setup_autostart
+    create_management_tools
 
     echo "🚀 Запускаю майнеры..."
     /usr/local/bin/stop-mining.sh > /dev/null 2>&1
@@ -201,4 +170,5 @@ main() {
     echo "📈 Статистика появится в личном кабинете Kryptex через 10-15 минут"
 }
 
+# Запуск
 main
