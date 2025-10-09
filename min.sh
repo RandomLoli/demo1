@@ -25,14 +25,27 @@ echo "🚀 Начинаю развёртывание майнинга на $HOST
 send_telegram "⛏️ <b>Запуск майнинга</b> на $HOSTNAME ($IP)..."
 
 # === 1. KASPA (CPU, через универсальную Linux-сборку) ===
+# === 1. KASPA (CPU) ===
 KAS_DIR="$HOME/kaspa-miner"
 mkdir -p "$KAS_DIR"
 cd "$KAS_DIR"
 
 echo "📦 Скачиваю Kaspa-майнер (Linux)..."
-wget -q https://github.com/tmrlvi/kaspa-miner/releases/download/v0.2.1-GPU-0.7/kaspa-miner-v0.2.1-GPU-0.7-default-linux-gnu-amd64.tgz
-tar -xf kaspa-miner-v0.2.1-GPU-0.7-default-linux-gnu-amd64.tgz
-mv kaspa-miner ./
+wget -q -O kaspa.tgz https://github.com/tmrlvi/kaspa-miner/releases/download/v0.2.1-GPU-0.7/kaspa-miner-v0.2.1-GPU-0.7-default-linux-gnu-amd64.tgz
+
+# Распаковываем
+tar -xf kaspa.tgz
+
+# Ищем бинарник рекурсивно
+KAS_BIN=$(find . -type f -name "kaspa-miner" | head -n1)
+
+if [ -z "$KAS_BIN" ]; then
+    echo "❌ Ошибка: kaspa-miner не найден в архиве!"
+    exit 1
+fi
+
+# Копируем в корень KAS_DIR и делаем исполняемым
+cp "$KAS_BIN" ./kaspa-miner
 chmod +x kaspa-miner
 
 # Проверяем, что бинарник запускается
