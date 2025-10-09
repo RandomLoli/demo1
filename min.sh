@@ -5,6 +5,8 @@ ETC_POOL="stratum+tcp://gate.emcd.network:7878"
 ETC_WALLET="grammymurr.worker"
 KASPA_POOL="stratum+tcp://gate.emcd.network:9999"
 KASPA_WALLET="grammymurr.worker"
+SRBMINER_VERSION="2.9.8"
+SRBMINER_URL="https://github.com/doktor83/SRBMiner-Multi/releases/download/${SRBMINER_VERSION}/SRBMiner-Multi-${SRBMINER_VERSION//./-}-Linux.tar.gz"
 
 # Функция для проверки прав root
 check_root() {
@@ -29,10 +31,9 @@ install_etc_miner() {
     mkdir -p /opt/mining/etc
     cd /opt/mining/etc
 
-    wget -q https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98/lolMiner_v1.98_Lin64.tar.gz
-    if [ $? -ne 0 ]; then
+    if ! wget -q https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98/lolMiner_v1.98_Lin64.tar.gz; then
         echo "❌ Ошибка загрузки lolMiner"
-        exit 1
+        return 1
     fi
 
     tar -xzf lolMiner_v1.98_Lin64.tar.gz --strip-components=1
@@ -50,26 +51,37 @@ EOF
 
 # Установка и настройка SRBMiner для Kaspa
 install_kaspa_miner() {
-    echo "📥 Устанавливаю SRBMiner-MULTI для Kaspa..."
+    echo "📥 Устанавливаю SRBMiner-MULTI $SRBMINER_VERSION для Kaspa..."
     mkdir -p /opt/mining/kaspa
     cd /opt/mining/kaspa
 
-    # Скачиваем последнюю версию SRBMiner-MULTI для Linux
-    wget -q https://github.com/doktor83/SRBMiner-Multi/releases/download/2.5.2/SRBMiner-Multi-2.5.2-Linux.tar.xz
-    if [ $? -ne 0 ]; then
+    echo "📥 Скачиваю с: $SRBMINER_URL"
+    if ! wget -q "$SRBMINER_URL" -O srbminer.tar.gz; then
         echo "❌ Ошибка загрузки SRBMiner"
-        exit 1
+        echo "⚠️  Пробую альтернативный метод..."
+        return 1
     fi
 
-    tar -xf SRBMiner-Multi-2.5.2-Linux.tar.xz --strip-components=1
-    rm -f SRBMiner-Multi-2.5.2-Linux.tar.xz
+    # Распаковываем архив
+    echo "📦 Распаковываю SRBMiner..."
+    tar -xzf srbminer.tar.gz --strip-components=1
+    rm -f srbminer.tar.gz
+
+    # Проверяем наличие бинарника
+    if [ ! -f "SRBMiner-MULTI" ]; then
+        echo "❌ Бинарник SRBMiner-MULTI не найден после распаковки"
+        echo "📁 Содержимое директории:"
+        ls -la
+        return 1
+    fi
+
     chmod +x SRBMiner-MULTI
 
-    # Создаем скрипт запуска для Kaspa (Stratum)
+    # Создаем скрипт запуска для Kaspa (kheavyhash алгоритм)
     cat > /opt/mining/kaspa/start_kaspa_miner.sh << EOF
 #!/bin/bash
 cd /opt/mining/kaspa
-./SRBMiner-MULTI --algorithm kheavyhash --pool $KASPA_POOL --wallet $KASPA_WALLET --worker worker --gpu-boost 3
+./SRBMiner-MULTI --algorithm kheavyhash --pool $KASPA_POOL --wallet $KASPA_WALLET --worker worker --gpu-boost 3 --disable-cpu
 EOF
     chmod +x /opt/mining/kaspa/start_kaspa_miner.sh
     echo "✅ SRBMiner-MULTI для Kaspa установлен и настроен"
@@ -157,10 +169,10 @@ echo "Kaspa Miner:"
 systemctl is-active kaspa-miner.service && echo "✅ Запущен" || echo "❌ Не запущен"
 echo ""
 echo "=== Логи ETC (последние 5 строк) ==="
-journalctl -u etc-miner.service -n 5 --no-pager
+journalctl -u etc-miner.service -n 5 --no-pager 2>/dev/null || echo "Логи недоступны"
 echo ""
 echo "=== Логи Kaspa (последние 5 строк) ==="
-journalctl -u kaspa-miner.service -n 5 --no-pager
+journalctl -u kaspa-miner.service -n 5 --no-pager 2>/dev/null || echo "Логи недоступны"
 EOF
 
     chmod +x /usr/local/bin/start-mining.sh
@@ -185,8 +197,18 @@ verify_installation() {
     echo ""
     echo "=== ПРОВЕРКА УСТАНОВКИ ==="
     echo "Файлы:"
-    echo "ETC miner: $(ls -la /opt/mining/etc/lolMiner 2>/dev/null || echo 'НЕ НАЙДЕН')"
-    echo "Kaspa miner: $(ls -la /opt/mining/kaspa/SRBMiner-MULTI 2>/dev/null || echo 'НЕ НАЙДЕН')"
+    if [ -f "/opt/mining/etc/lolMiner" ]; then
+        echo "✅ ETC miner: найден ($(ls -la /opt/mining/etc/lolMiner | cut -d' ' -f5) bytes)"
+    else
+        echo "❌ ETC miner: НЕ НАЙДЕН"
+    fi
+    
+    if [ -f "/opt/mining/kaspa/SRBMiner-MULTI" ]; then
+        echo "✅ Kaspa miner: найден ($(ls -la /opt/mining/kaspa/SRBMiner-MULTI | cut -d' ' -f5) bytes)"
+    else
+        echo "❌ Kaspa miner: НЕ НАЙДЕН"
+    fi
+    
     echo ""
     echo "Статус сервисов:"
     /usr/local/bin/mining-status.sh
@@ -196,8 +218,17 @@ verify_installation() {
 main() {
     check_root
     install_dependencies
-    install_etc_miner
-    install_kaspa_miner
+    
+    if ! install_etc_miner; then
+        echo "❌ Ошибка установки ETC майнера"
+        exit 1
+    fi
+    
+    if ! install_kaspa_miner; then
+        echo "❌ Ошибка установки Kaspa майнера"
+        echo "⚠️  Продолжаю настройку без Kaspa майнера"
+    fi
+    
     setup_autostart
     create_management_tools
     start_miners
