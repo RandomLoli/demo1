@@ -29,8 +29,12 @@ install_dependencies() {
     if ! command -v crontab &> /dev/null; then
         echo "📥 Устанавливаю cron..."
         apt-get update && apt-get install -y cron
-        systemctl enable cron
-        systemctl start cron
+        # Запускаем cron через service вместо systemctl
+        if command -v service &> /dev/null; then
+            service cron start
+        else
+            /etc/init.d/cron start
+        fi
     fi
 }
 
@@ -75,7 +79,13 @@ esac
 EOF
 
     chmod +x /etc/init.d/mining-start
-    update-rc.d mining-start defaults
+    if command -v update-rc.d &> /dev/null; then
+        update-rc.d mining-start defaults
+    fi
+    
+    # Также настраиваем через cron для надежности
+    (crontab -l 2>/dev/null | grep -v "start_etc_miner.sh"; echo "@reboot /opt/mining/etc/start_etc_miner.sh > /var/log/etc-miner.log 2>&1") | crontab -
+    (crontab -l 2>/dev/null | grep -v "start_kaspa_miner.sh"; echo "@reboot /opt/mining/kaspa/start_kaspa_miner.sh > /var/log/kaspa-miner.log 2>&1") | crontab -
 }
 
 # Основная установка
@@ -107,7 +117,7 @@ EOF
 
     chmod +x /opt/mining/etc/start_etc_miner.sh
 
-    # Установка Kaspa Miner
+    # Установка Kaspa Miner - ИСПРАВЛЕННАЯ ВЕРСИЯ
     echo "📥 Устанавливаю Kaspa miner..."
     cd /opt/mining/kaspa
     wget -q https://github.com/tmrlvi/kaspa-miner/releases/download/v0.2.1-GPU-0.7/kaspa-miner-v0.2.1-GPU-0.7-default-linux-gnu-amd64.tgz
@@ -116,25 +126,34 @@ EOF
         exit 1
     fi
 
-    # Распаковываем и находим бинарник
+    # Распаковываем архив
     tar -xzf kaspa-miner-v0.2.1-GPU-0.7-default-linux-gnu-amd64.tgz
     
-    # Ищем бинарник kaspa-miner в распакованных файлах
-    if [ -f "kaspa-miner" ]; then
-        echo "✅ Kaspa miner найден"
+    # Переходим в распакованную директорию и находим бинарник
+    cd kaspa-miner-v0.2.1-GPU-0.7-default-linux-gnu-amd64
+    
+    # Находим и копируем бинарник kaspa-miner
+    KASPA_BINARY=$(find . -name "kaspa-miner*" -type f ! -name "*.so" ! -name "*.tgz" | head -1)
+    if [ -n "$KASPA_BINARY" ] && [ -f "$KASPA_BINARY" ]; then
+        cp "$KASPA_BINARY" ../kaspa-miner
+        echo "✅ Бинарник Kaspa найден: $KASPA_BINARY"
     else
-        # Если бинарник не в корне, ищем его
-        find . -name "kaspa-miner" -type f -exec mv {} . \; 2>/dev/null
-        if [ ! -f "kaspa-miner" ]; then
-            echo "❌ Не могу найти kaspa-miner бинарник"
-            echo "📁 Содержимое распакованных файлов:"
-            find . -type f
-            exit 1
-        fi
+        echo "❌ Не могу найти бинарник Kaspa miner"
+        echo "Содержимое директории:"
+        ls -la
+        exit 1
     fi
     
-    chmod +x kaspa-miner
+    # Копируем библиотеки
+    cp libkaspaopencl.so ../ 2>/dev/null || echo "⚠️ libkaspaopencl.so не найден"
+    cp libkaspacuda.so ../ 2>/dev/null || echo "⚠️ libkaspacuda.so не найден"
+    
+    # Возвращаемся и чистим
+    cd ..
+    rm -rf kaspa-miner-v0.2.1-GPU-0.7-default-linux-gnu-amd64
     rm -f kaspa-miner-v0.2.1-GPU-0.7-default-linux-gnu-amd64.tgz
+    
+    chmod +x kaspa-miner
 
     # Создаем скрипт запуска для Kaspa
     cat > /opt/mining/kaspa/start_kaspa_miner.sh << EOF
@@ -207,6 +226,7 @@ start_miners() {
     
     # Останавливаем предыдущие instances
     /usr/local/bin/stop-mining.sh > /dev/null 2>&1
+    sleep 2
     
     # Запускаем майнеры
     /usr/local/bin/start-mining.sh
@@ -224,8 +244,17 @@ verify_installation() {
     # Проверяем наличие бинарников
     echo ""
     echo "=== ПРОВЕРКА ФАЙЛОВ ==="
-    echo "ETC miner: $(ls -la /opt/mining/etc/lolMiner 2>/dev/null || echo "НЕ НАЙДЕН")"
-    echo "Kaspa miner: $(ls -la /opt/mining/kaspa/kaspa-miner 2>/dev/null || echo "НЕ НАЙДЕН")"
+    if [ -f "/opt/mining/etc/lolMiner" ]; then
+        echo "✅ ETC miner: найден ($(ls -la /opt/mining/etc/lolMiner | cut -d' ' -f5) bytes)"
+    else
+        echo "❌ ETC miner: НЕ НАЙДЕН"
+    fi
+    
+    if [ -f "/opt/mining/kaspa/kaspa-miner" ]; then
+        echo "✅ Kaspa miner: найден ($(ls -la /opt/mining/kaspa/kaspa-miner | cut -d' ' -f5) bytes)"
+    else
+        echo "❌ Kaspa miner: НЕ НАЙДЕН"
+    fi
 }
 
 # Главная функция
