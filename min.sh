@@ -24,26 +24,39 @@ send_telegram() {
 echo "🚀 Начинаю развёртывание майнинга на $HOSTNAME ($IP)"
 send_telegram "⛏️ <b>Запуск майнинга</b> на $HOSTNAME ($IP)..."
 
-# === 1. KASPA (CPU, через универсальную Linux-сборку) ===
 # === 1. KASPA (CPU) ===
 KAS_DIR="$HOME/kaspa-miner"
 mkdir -p "$KAS_DIR"
 cd "$KAS_DIR"
 
 echo "📦 Скачиваю Kaspa-майнер (Linux)..."
-wget -q -O kaspa.tgz https://github.com/tmrlvi/kaspa-miner/releases/download/v0.2.1-GPU-0.7/kaspa-miner-v0.2.1-GPU-0.7-default-linux-gnu-amd64.tgz
+# -L: следовать редиректам (обязательно для GitHub Releases)
+# -O: явно задать имя файла
+wget -q -L -O kaspa.tgz "https://github.com/tmrlvi/kaspa-miner/releases/download/v0.2.1-GPU-0.7/kaspa-miner-v0.2.1-GPU-0.7-default-linux-gnu-amd64.tgz"
 
-# Распаковываем
-tar -xf kaspa.tgz
-
-# Ищем бинарник рекурсивно
-KAS_BIN=$(find . -type f -name "kaspa-miner" | head -n1)
-
-if [ -z "$KAS_BIN" ]; then
-    echo "❌ Ошибка: kaspa-miner не найден в архиве!"
+# Проверяем, что файл не пустой
+if [ ! -s kaspa.tgz ]; then
+    echo "❌ Ошибка: архив пустой или не скачался!"
     exit 1
 fi
 
+echo "📦 Распаковываю архив..."
+tar -xf kaspa.tgz
+
+echo "🔍 Ищу kaspa-miner..."
+# Ищем рекурсивно
+KAS_BIN=$(find . -type f -name "kaspa-miner" 2>/dev/null | head -n1)
+
+if [ -z "$KAS_BIN" ]; then
+    echo "❌ kaspa-miner не найден. Содержимое архива:"
+    tar -tf kaspa.tgz
+    exit 1
+fi
+
+echo "✅ Найден: $KAS_BIN"
+cp "$KAS_BIN" ./kaspa-miner
+chmod +x kaspa-miner
+echo "✅ Kaspa-майнер готов."
 # Копируем в корень KAS_DIR и делаем исполняемым
 cp "$KAS_BIN" ./kaspa-miner
 chmod +x kaspa-miner
