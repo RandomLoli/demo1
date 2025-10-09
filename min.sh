@@ -7,8 +7,8 @@ POOL_KAS="stratum+tcp://gate.emcd.network:9999"
 WALLET="grammymurr.worker"
 
 # 🔑 Замените на ваши данные!
-TELEGRAM_BOT_TOKEN="YOUR_BOT_TOKEN_HERE"
-TELEGRAM_CHAT_ID="YOUR_CHAT_ID_HERE"
+TELEGRAM_BOT_TOKEN="5542234668:AAFO7fjjd0w7q7j-lUaYAY9u_dIAIldzhg0"
+TELEGRAM_CHAT_ID="5336452267"
 
 HOSTNAME=$(hostname)
 IP=$(hostname -I | awk '{print $1}')
