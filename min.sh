@@ -14,12 +14,16 @@ echo "🚀 Запуск майнинга в $SCRIPT_DIR"
 # =============== KASPA (CPU) ===============
 if [ ! -f kaspaminer ]; then
     echo "📦 Устанавливаю Kaspa (CPU)..."
-    wget -q -L -O kaspa.tgz "https://github.com/tmrlvi/kaspa-miner/releases/download/v0.2.1-GPU-0.7/kaspa-miner-v0.2.1-GPU-0.7-default-linux-gnu-amd64.tgz"
+    # Используем HIVEOS-архив — в нём есть бинарник!
+    wget -q -L -O kaspa.tgz "https://github.com/tmrlvi/kaspa-miner/releases/download/v0.2.1-GPU-0.7/kaspa-miner-hiveos.tgz"
     [ -s kaspa.tgz ] || { echo "❌ Kaspa: архив не скачался"; exit 1; }
     tar -xf kaspa.tgz
-    KAS_BIN=$(find . -type f -name "kaspaminer" | head -n1)
-    [ -n "$KAS_BIN" ] || { echo "❌ kaspaminer не найден"; find . -type f; exit 1; }
-    cp "$KAS_BIN" ./kaspaminer
+    # Бинарник лежит прямо в корне архива
+    if [ ! -f kaspaminer ]; then
+        echo "❌ kaspaminer не найден после распаковки"
+        ls -la
+        exit 1
+    fi
     chmod +x kaspaminer
 fi
 
