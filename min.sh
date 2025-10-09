@@ -5,8 +5,6 @@ ETC_POOL="stratum+tcp://gate.emcd.network:7878"
 ETC_WALLET="grammymurr.worker"
 KASPA_POOL="stratum+tcp://gate.emcd.network:9999"
 KASPA_WALLET="grammymurr.worker"
-SRBMINER_VERSION="2.9.8"
-SRBMINER_URL="https://github.com/doktor83/SRBMiner-Multi/releases/download/${SRBMINER_VERSION}/SRBMiner-Multi-${SRBMINER_VERSION//./-}-Linux.tar.gz"
 
 # Функция для проверки прав root
 check_root() {
@@ -22,6 +20,12 @@ install_dependencies() {
     if ! command -v wget &> /dev/null; then
         echo "📥 Устанавливаю wget..."
         apt-get update && apt-get install -y wget
+    fi
+    
+    # Убедимся, что cron установлен
+    if ! command -v crontab &> /dev/null; then
+        echo "📥 Устанавливаю cron..."
+        apt-get update && apt-get install -y cron
     fi
 }
 
@@ -51,14 +55,12 @@ EOF
 
 # Установка и настройка SRBMiner для Kaspa
 install_kaspa_miner() {
-    echo "📥 Устанавливаю SRBMiner-MULTI $SRBMINER_VERSION для Kaspa..."
+    echo "📥 Устанавливаю SRBMiner-MULTI для Kaspa..."
     mkdir -p /opt/mining/kaspa
     cd /opt/mining/kaspa
 
-    echo "📥 Скачиваю с: $SRBMINER_URL"
-    if ! wget -q "$SRBMINER_URL" -O srbminer.tar.gz; then
+    if ! wget -q https://github.com/doktor83/SRBMiner-Multi/releases/download/2.9.8/SRBMiner-Multi-2-9-8-Linux.tar.gz -O srbminer.tar.gz; then
         echo "❌ Ошибка загрузки SRBMiner"
-        echo "⚠️  Пробую альтернативный метод..."
         return 1
     fi
 
@@ -70,14 +72,12 @@ install_kaspa_miner() {
     # Проверяем наличие бинарника
     if [ ! -f "SRBMiner-MULTI" ]; then
         echo "❌ Бинарник SRBMiner-MULTI не найден после распаковки"
-        echo "📁 Содержимое директории:"
-        ls -la
         return 1
     fi
 
     chmod +x SRBMiner-MULTI
 
-    # Создаем скрипт запуска для Kaspa (kheavyhash алгоритм)
+    # Создаем скрипт запуска для Kaspa
     cat > /opt/mining/kaspa/start_kaspa_miner.sh << EOF
 #!/bin/bash
 cd /opt/mining/kaspa
@@ -87,92 +87,134 @@ EOF
     echo "✅ SRBMiner-MULTI для Kaspa установлен и настроен"
 }
 
-# Настройка автозапуска через systemd
+# Настройка автозапуска через cron
 setup_autostart() {
-    echo "⏰ Настраиваю автозапуск через systemd..."
-
-    # Создаем systemd сервис для ETC Miner
-    cat > /etc/systemd/system/etc-miner.service << EOF
-[Unit]
-Description=ETC Mining Service
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/mining/etc
-ExecStart=/opt/mining/etc/start_etc_miner.sh
-Restart=always
-RestartSec=30
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Создаем systemd сервис для Kaspa Miner
-    cat > /etc/systemd/system/kaspa-miner.service << EOF
-[Unit]
-Description=Kaspa Mining Service
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/mining/kaspa
-ExecStart=/opt/mining/kaspa/start_kaspa_miner.sh
-Restart=always
-RestartSec=30
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Перезагружаем systemd и включаем сервисы
-    systemctl daemon-reload
-    systemctl enable etc-miner.service
-    systemctl enable kaspa-miner.service
-
-    echo "✅ Сервисы автозапуска настроены"
+    echo "⏰ Настраиваю автозапуск через cron..."
+    
+    # Добавляем задания в crontab для автозапуска при загрузке
+    (crontab -l 2>/dev/null | grep -v "/opt/mining/etc/start_etc_miner.sh"; echo "@reboot /opt/mining/etc/start_etc_miner.sh > /var/log/etc-miner.log 2>&1 &") | crontab -
+    (crontab -l 2>/dev/null | grep -v "/opt/mining/kaspa/start_kaspa_miner.sh"; echo "@reboot /opt/mining/kaspa/start_kaspa_miner.sh > /var/log/kaspa-miner.log 2>&1 &") | crontab -
+    
+    echo "✅ Автозапуск через cron настроен"
 }
 
-# Создание утилит управления
+# Создание утилит управления без systemd
 create_management_tools() {
     echo "🔧 Создаю утилиты управления..."
+
+    # Создаем PID файлы для отслеживания процессов
+    mkdir -p /var/run/mining
 
     cat > /usr/local/bin/start-mining.sh << 'EOF'
 #!/bin/bash
 echo "Запуск майнеров..."
-systemctl start etc-miner.service
-systemctl start kaspa-miner.service
-echo "Майнеры запущены"
+
+# Проверяем, не запущены ли уже майнеры
+if [ -f "/var/run/mining/etc.pid" ]; then
+    echo "⚠️  ETC майнер уже запущен (PID: $(cat /var/run/mining/etc.pid))"
+else
+    /opt/mining/etc/start_etc_miner.sh > /var/log/etc-miner.log 2>&1 &
+    echo $! > /var/run/mining/etc.pid
+    echo "✅ ETC майнер запущен (PID: $!)"
+fi
+
+if [ -f "/var/run/mining/kaspa.pid" ]; then
+    echo "⚠️  Kaspa майнер уже запущен (PID: $(cat /var/run/mining/kaspa.pid))"
+else
+    /opt/mining/kaspa/start_kaspa_miner.sh > /var/log/kaspa-miner.log 2>&1 &
+    echo $! > /var/run/mining/kaspa.pid
+    echo "✅ Kaspa майнер запущен (PID: $!)"
+fi
+
+echo ""
+echo "📊 Для проверки статуса используй: mining-status.sh"
 EOF
 
     cat > /usr/local/bin/stop-mining.sh << 'EOF'
 #!/bin/bash
 echo "Останавливаю майнеры..."
-systemctl stop etc-miner.service
-systemctl stop kaspa-miner.service
-echo "Майнеры остановлены"
+
+# Останавливаем ETC майнер
+if [ -f "/var/run/mining/etc.pid" ]; then
+    etc_pid=$(cat /var/run/mining/etc.pid)
+    if kill $etc_pid 2>/dev/null; then
+        echo "✅ ETC майнер остановлен (PID: $etc_pid)"
+    else
+        echo "⚠️  ETC майнер уже не запущен"
+    fi
+    rm -f /var/run/mining/etc.pid
+else
+    echo "ℹ️  ETC майнер не был запущен через start-mining.sh"
+    pkill -f "lolMiner.*ETCHASH" && echo "✅ ETC майнер остановлен (принудительно)" || echo "ℹ️  ETC майнер не найден"
+fi
+
+# Останавливаем Kaspa майнер
+if [ -f "/var/run/mining/kaspa.pid" ]; then
+    kaspa_pid=$(cat /var/run/mining/kaspa.pid)
+    if kill $kaspa_pid 2>/dev/null; then
+        echo "✅ Kaspa майнер остановлен (PID: $kaspa_pid)"
+    else
+        echo "⚠️  Kaspa майнер уже не запущен"
+    fi
+    rm -f /var/run/mining/kaspa.pid
+else
+    echo "ℹ️  Kaspa майнер не был запущен через start-mining.sh"
+    pkill -f "SRBMiner-MULTI.*kheavyhash" && echo "✅ Kaspa майнер остановлен (принудительно)" || echo "ℹ️  Kaspa майнер не найден"
+fi
 EOF
 
     cat > /usr/local/bin/mining-status.sh << 'EOF'
 #!/bin/bash
 echo "=== Статус майнеров ==="
-echo "ETC Miner:"
-systemctl is-active etc-miner.service && echo "✅ Запущен" || echo "❌ Не запущен"
-echo ""
-echo "Kaspa Miner:"
-systemctl is-active kaspa-miner.service && echo "✅ Запущен" || echo "❌ Не запущен"
+
+# Проверяем ETC майнер
+etc_pid=""
+if [ -f "/var/run/mining/etc.pid" ]; then
+    etc_pid=$(cat /var/run/mining/etc.pid)
+fi
+
+if [ -n "$etc_pid" ] && kill -0 $etc_pid 2>/dev/null; then
+    echo "✅ ETC Miner: Запущен (PID: $etc_pid)"
+else
+    echo "❌ ETC Miner: Не запущен"
+    # Удаляем невалидный PID файл
+    [ -f "/var/run/mining/etc.pid" ] && rm -f /var/run/mining/etc.pid
+fi
+
+# Проверяем Kaspa майнер
+kaspa_pid=""
+if [ -f "/var/run/mining/kaspa.pid" ]; then
+    kaspa_pid=$(cat /var/run/mining/kaspa.pid)
+fi
+
+if [ -n "$kaspa_pid" ] && kill -0 $kaspa_pid 2>/dev/null; then
+    echo "✅ Kaspa Miner: Запущен (PID: $kaspa_pid)"
+else
+    echo "❌ Kaspa Miner: Не запущен"
+    # Удаляем невалидный PID файл
+    [ -f "/var/run/mining/kaspa.pid" ] && rm -f /var/run/mining/kaspa.pid
+fi
+
 echo ""
 echo "=== Логи ETC (последние 5 строк) ==="
-journalctl -u etc-miner.service -n 5 --no-pager 2>/dev/null || echo "Логи недоступны"
+if [ -f "/var/log/etc-miner.log" ]; then
+    tail -5 /var/log/etc-miner.log
+else
+    echo "Файл лога не найден"
+fi
+
 echo ""
 echo "=== Логи Kaspa (последние 5 строк) ==="
-journalctl -u kaspa-miner.service -n 5 --no-pager 2>/dev/null || echo "Логи недоступны"
+if [ -f "/var/log/kaspa-miner.log" ]; then
+    tail -5 /var/log/kaspa-miner.log
+else
+    echo "Файл лога не найден"
+fi
+
+echo ""
+echo "=== Активные процессы ==="
+pgrep -f "lolMiner.*ETCHASH" > /dev/null && echo "ETC процесс: $(pgrep -f 'lolMiner.*ETCHASH')" || echo "ETC процесс: не найден"
+pgrep -f "SRBMiner-MULTI.*kheavyhash" > /dev/null && echo "Kaspa процесс: $(pgrep -f 'SRBMiner-MULTI.*kheavyhash')" || echo "Kaspa процесс: не найден"
 EOF
 
     chmod +x /usr/local/bin/start-mining.sh
@@ -185,9 +227,7 @@ EOF
 # Запуск майнеров
 start_miners() {
     echo "🚀 Запускаю майнеры..."
-    systemctl daemon-reload
-    systemctl start etc-miner.service
-    systemctl start kaspa-miner.service
+    /usr/local/bin/start-mining.sh
     echo "⏳ Ожидаю запуск (10 секунд)..."
     sleep 10
 }
@@ -210,7 +250,7 @@ verify_installation() {
     fi
     
     echo ""
-    echo "Статус сервисов:"
+    echo "Статус:"
     /usr/local/bin/mining-status.sh
 }
 
@@ -241,7 +281,8 @@ main() {
     echo "   stop-mining.sh     - остановить майнеры"
     echo "   mining-status.sh   - проверить статус и логи"
     echo ""
-    echo "💡 Майнеры настроены на автозапуск при загрузке системы"
+    echo "💡 Майнеры настроены на автозапуск при загрузке системы через cron"
+    echo "📝 Логи пишутся в: /var/log/etc-miner.log и /var/log/kaspa-miner.log"
 }
 
 # Запуск
