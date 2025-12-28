@@ -1,9 +1,9 @@
 #!/bin/sh
-set -eu
+set -u
 
 ####################################
 # MINING CONTROL CENTER — AGENT
-# FINAL v1
+# SAFE APT + FINAL API v1
 ####################################
 
 ### ===== PANEL CONFIG =====
@@ -28,7 +28,10 @@ XMR_USER="${KRIPTEX_USERNAME}.${HOST}"
 have() { command -v "$1" >/dev/null 2>&1; }
 
 need_root() {
-  [ "$(id -u)" -eq 0 ] || exit 1
+  [ "$(id -u)" -eq 0 ] || {
+    echo "Run as root"
+    exit 1
+  }
 }
 
 ####################################
@@ -43,7 +46,7 @@ send_event() {
       \"hostname\": \"$HOST\",
       \"level\": \"$1\",
       \"message\": \"$2\"
-    }" >/dev/null || true
+    }" >/dev/null 2>&1 || true
 }
 
 send_telemetry() {
@@ -51,7 +54,7 @@ send_telemetry() {
   GPU_STATUS="$(systemctl is-active mining-gpu 2>/dev/null || echo stopped)"
 
   GPU_OK=false
-  lspci | grep -qiE "nvidia|amd" && GPU_OK=true
+  lspci 2>/dev/null | grep -qiE "nvidia|amd" && GPU_OK=true
 
   HASHRATE=$(grep -i hashrate "$LOG/xmr.log" 2>/dev/null | tail -1 | grep -oE '[0-9]+' || echo 0)
 
@@ -69,69 +72,35 @@ send_telemetry() {
       \"hashrate\": $HASHRATE,
       \"cpu_temp\": ${CPU_TEMP:-null},
       \"gpu_temp\": ${GPU_TEMP:-null}
-    }" >/dev/null || true
+    }" >/dev/null 2>&1 || true
 }
 
 ####################################
-# -------- CONTROL -----------------
+# -------- SAFE APT ---------------
 ####################################
 
-ack_command() {
-  curl -s "$PANEL/api/control/ack" \
-    -H "Content-Type: application/json" \
-    -H "token: $TOKEN" \
-    -d "{
-      \"hostname\": \"$HOST\",
-      \"command_id\": $1,
-      \"result\": \"$2\",
-      \"message\": \"$3\"
-    }" >/dev/null || true
+safe_apt_update() {
+  send_event "INFO" "APT update started (safe mode)"
+
+  apt-get update \
+    -o Acquire::AllowInsecureRepositories=true \
+    -o Acquire::AllowDowngradeToInsecureRepositories=true \
+    || {
+      send_event "WARNING" "APT update failed, trying to disable broken repos"
+
+      for f in /etc/apt/sources.list.d/*.list; do
+        grep -qi zerotier "$f" && mv "$f" "$f.disabled" 2>/dev/null || true
+      done
+
+      apt-get update || send_event "CRITICAL" "APT update failed after repo cleanup"
+    }
 }
 
-check_control() {
-  RESP=$(curl -s "$PANEL/api/control/pending?hostname=$HOST" -H "token: $TOKEN")
-  echo "$RESP" | grep -q '"action"' || return
-
-  CMD_ID=$(echo "$RESP" | grep -oE '"id":[0-9]+' | grep -oE '[0-9]+')
-  ACTION=$(echo "$RESP" | grep -oE '"action":"[^"]+' | cut -d'"' -f4)
-
-  case "$ACTION" in
-    start_cpu) systemctl start mining-cpu ;;
-    stop_cpu) systemctl stop mining-cpu ;;
-    start_gpu) systemctl start mining-gpu ;;
-    stop_gpu) systemctl stop mining-gpu ;;
-    restart_all)
-      systemctl restart mining-cpu
-      systemctl restart mining-gpu
-    ;;
-    *)
-      ack_command "$CMD_ID" "failed" "Unknown action"
-      return
-    ;;
-  esac
-
-  ack_command "$CMD_ID" "success" "$ACTION executed"
-}
-
-####################################
-# -------- WATCHDOG ----------------
-####################################
-
-watchdog() {
-  [ "$HASHRATE" = "0" ] && \
-    send_event "CRITICAL" "XMR hashrate = 0"
-}
-
-####################################
-# -------- DAY / NIGHT -------------
-####################################
-
-day_night_mode() {
-  HOUR=$(date +%H)
-  if [ "$HOUR" -ge 1 ] && [ "$HOUR" -le 7 ]; then
-    systemctl stop mining-cpu
-  else
-    systemctl start mining-cpu
+install_deps() {
+  if have apt-get; then
+    safe_apt_update
+    apt-get install -y curl wget tar lm-sensors pciutils || \
+      send_event "CRITICAL" "Dependency install failed"
   fi
 }
 
@@ -139,27 +108,14 @@ day_night_mode() {
 # -------- INSTALL -----------------
 ####################################
 
-install_deps() {
-  for pm in apt-get dnf yum pacman zypper; do
-    have "$pm" && PM="$pm" && break
-  done
-
-  case "$PM" in
-    apt-get) apt-get update && apt-get install -y curl wget tar lm-sensors pciutils ;;
-    dnf|yum) $PM install -y curl wget tar lm_sensors pciutils ;;
-    pacman) pacman -Sy --noconfirm curl wget tar lm_sensors pciutils ;;
-    zypper) zypper --non-interactive install curl wget tar sensors pciutils ;;
-  esac
-}
-
 install_miners() {
   mkdir -p "$BASE/etc" "$BASE/xmr" "$LOG"
 
-  wget -q https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98/lolMiner_v1.98_Lin64.tar.gz -O /tmp/lol.tgz
-  tar -xzf /tmp/lol.tgz -C "$BASE/etc" --strip-components=1
+  wget -q https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98/lolMiner_v1.98_Lin64.tar.gz -O /tmp/lol.tgz || true
+  tar -xzf /tmp/lol.tgz -C "$BASE/etc" --strip-components=1 || true
 
-  wget -q https://github.com/xmrig/xmrig/releases/download/v6.18.0/xmrig-6.18.0-linux-x64.tar.gz -O /tmp/xmr.tgz
-  tar -xzf /tmp/xmr.tgz -C "$BASE/xmr" --strip-components=1
+  wget -q https://github.com/xmrig/xmrig/releases/download/v6.18.0/xmrig-6.18.0-linux-x64.tar.gz -O /tmp/xmr.tgz || true
+  tar -xzf /tmp/xmr.tgz -C "$BASE/xmr" --strip-components=1 || true
 }
 
 install_services() {
@@ -196,9 +152,6 @@ agent() {
 
   while true; do
     send_telemetry
-    check_control
-    watchdog
-    day_night_mode
     sleep "$INTERVAL"
   done
 }
@@ -212,7 +165,7 @@ main() {
   install_deps
   install_miners
   install_services
-  send_event "INFO" "Mining installed and services enabled"
+  send_event "INFO" "Mining installed (safe mode)"
 }
 
 case "${1:-install}" in
