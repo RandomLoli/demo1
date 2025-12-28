@@ -2,8 +2,7 @@
 set -u
 
 ############################################
-# MINING CONTROL CENTER — FINAL AGENT
-# non-root • no systemd • stable telemetry
+# MINING CONTROL CENTER — XMRIG API AGENT
 ############################################
 
 ### ===== PANEL =====
@@ -15,17 +14,15 @@ INTERVAL=30
 KRIPTEX_USERNAME="krxX3PVQVR"
 HOST="$(hostname)"
 
-ETC_POOL="etc.kryptex.network:7033"
 XMR_POOL="xmr.kryptex.network:7029"
 
 BASE="$HOME/.mining/bin"
 RUN="$HOME/.mining/run"
 LOG="$HOME/.mining/log"
 
-ETC_USER="${KRIPTEX_USERNAME}.${HOST}"
 XMR_USER="${KRIPTEX_USERNAME}.${HOST}"
 
-mkdir -p "$BASE/etc" "$BASE/xmr" "$RUN" "$LOG" >/dev/null 2>&1 || true
+mkdir -p "$BASE/xmr" "$RUN" "$LOG" >/dev/null 2>&1 || true
 
 ############################################
 # -------- PANEL API -----------------------
@@ -43,14 +40,25 @@ send_event() {
 }
 
 ############################################
-# -------- HASHRATE ------------------------
+# -------- XMRIG API -----------------------
 ############################################
 
+get_xmrig_summary() {
+  curl -s --max-time 2 http://127.0.0.1:16000/1/summary
+}
+
 get_hashrate() {
-  tail -n 50 "$LOG/xmr.log" 2>/dev/null \
-  | grep -Eo 'speed[^0-9]*([0-9]+(\.[0-9]+)?)' \
-  | tail -1 \
-  | grep -Eo '[0-9]+' || echo 0
+  get_xmrig_summary \
+    | grep -oE '"total":\[[^]]+' \
+    | head -1 \
+    | grep -oE '[0-9]+(\.[0-9]+)?' \
+    | head -1 || echo 0
+}
+
+get_threads() {
+  get_xmrig_summary \
+    | grep -oE '"count":[0-9]+' \
+    | grep -oE '[0-9]+' || echo 0
 }
 
 ############################################
@@ -59,15 +67,10 @@ get_hashrate() {
 
 send_telemetry() {
   HASHRATE="$(get_hashrate)"
+  THREADS="$(get_threads)"
 
   CPU_STATUS="stopped"
-  GPU_STATUS="stopped"
-
   [ -f "$RUN/mining-cpu.pid" ] && CPU_STATUS="running"
-  [ -f "$RUN/mining-gpu.pid" ] && GPU_STATUS="running"
-
-  GPU_OK=false
-  command -v lspci >/dev/null 2>&1 && lspci | grep -qiE "nvidia|amd" && GPU_OK=true
 
   curl -s "$PANEL/api/telemetry" \
     -H "Content-Type: application/json" \
@@ -75,44 +78,40 @@ send_telemetry() {
     -d "{
       \"hostname\": \"$HOST\",
       \"cpu_mining\": \"$CPU_STATUS\",
-      \"gpu_mining\": \"$GPU_STATUS\",
-      \"gpu_detected\": $GPU_OK,
+      \"gpu_mining\": \"stopped\",
+      \"gpu_detected\": false,
       \"hashrate\": $HASHRATE
     }" >/dev/null 2>&1 || true
 }
 
 ############################################
-# -------- MINERS --------------------------
+# -------- MINER ---------------------------
 ############################################
 
 start_cpu() {
   pkill -f xmrig 2>/dev/null || true
-  nohup "$BASE/xmr/xmrig" -o "$XMR_POOL" -u "$XMR_USER" -p x \
-    >> "$LOG/xmr.log" 2>&1 &
-  echo $! > "$RUN/mining-cpu.pid"
-}
 
-start_gpu() {
-  pkill -f lolMiner 2>/dev/null || true
-  nohup "$BASE/etc/lolMiner" --algo ETCHASH --pool "$ETC_POOL" --user "$ETC_USER" \
-    >> "$LOG/etc.log" 2>&1 &
-  echo $! > "$RUN/mining-gpu.pid"
+  nohup "$BASE/xmr/xmrig" \
+    -o "$XMR_POOL" \
+    -u "$XMR_USER" \
+    -p x \
+    --http-enabled \
+    --http-host 127.0.0.1 \
+    --http-port 16000 \
+    >> "$LOG/xmr.log" 2>&1 &
+
+  echo $! > "$RUN/mining-cpu.pid"
 }
 
 ############################################
 # -------- INSTALL -------------------------
 ############################################
 
-install_miners() {
-  [ ! -f "$BASE/xmr/xmrig" ] && {
-    wget -q https://github.com/xmrig/xmrig/releases/download/v6.18.0/xmrig-6.18.0-linux-x64.tar.gz -O /tmp/xmr.tgz &&
-    tar -xzf /tmp/xmr.tgz -C "$BASE/xmr" --strip-components=1
-  }
+install_xmrig() {
+  [ -f "$BASE/xmr/xmrig" ] && return
 
-  [ ! -f "$BASE/etc/lolMiner" ] && {
-    wget -q https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98/lolMiner_v1.98_Lin64.tar.gz -O /tmp/lol.tgz &&
-    tar -xzf /tmp/lol.tgz -C "$BASE/etc" --strip-components=1
-  }
+  wget -q https://github.com/xmrig/xmrig/releases/download/v6.18.0/xmrig-6.18.0-linux-x64.tar.gz -O /tmp/xmr.tgz || return
+  tar -xzf /tmp/xmr.tgz -C "$BASE/xmr" --strip-components=1
 }
 
 ############################################
@@ -120,10 +119,8 @@ install_miners() {
 ############################################
 
 agent() {
-  send_event "INFO" "Mining agent started"
-
+  send_event "INFO" "XMRig API agent started"
   start_cpu
-  start_gpu
 
   ZERO=0
 
@@ -146,5 +143,5 @@ agent() {
 # -------- MAIN ----------------------------
 ############################################
 
-install_miners
+install_xmrig
 agent
