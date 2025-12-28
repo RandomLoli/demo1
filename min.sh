@@ -8,8 +8,8 @@ WORKER_NAME="$(hostname)"
 ETC_POOL="etc.kryptex.network:7033"
 XMR_POOL="xmr.kryptex.network:7029"
 
-TELEGRAM_BOT_TOKEN=""
-TELEGRAM_CHAT_ID=""
+TELEGRAM_BOT_TOKEN="8556429231:AAFBKuMMfkrpnxJInSITVaBUD8prYuHcnLw"
+TELEGRAM_CHAT_ID="5336452267"
 
 BASE_DIR="/opt/mining"
 LOG_DIR="/var/log/mining"
