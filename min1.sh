@@ -1,138 +1,151 @@
-#!/usr/bin/env bash
+#!/bin/sh
 
-###############################################################################
-# PROFESSIONAL MINING AGENT (FIXED)
-# CPU: XMR (XMRig)
+#################################################
+# STABLE MINING AGENT (FIXED)
+# CPU: XMR (XMRig, Kryptex)
 # GPU: ETC (lolMiner, Kryptex)
-# Control: Telegram (HTML, safe)
-###############################################################################
+#################################################
 
-set -o pipefail
+[ "${ALLOW_MINING:-0}" = "1" ] || exit 0
 
-# ===================== ENV =====================
-ALLOW_MINING="${ALLOW_MINING:-0}"
-[ "$ALLOW_MINING" = "1" ] || exit 0
-
+### ===== BASIC =====
 HOST="$(hostname)"
 BASE="$HOME/.mining"
-BIN_CPU="$BASE/bin/cpu"
-BIN_GPU="$BASE/bin/gpu"
+BIN="$BASE/bin"
+RUN="$BASE/run"
 LOG="$BASE/log"
-mkdir -p "$BIN_CPU" "$BIN_GPU" "$LOG"
 
-# ===================== KRYPTEX =====================
+mkdir -p "$BIN/cpu" "$BIN/gpu" "$RUN" "$LOG"
+
+### ===== KRYPTEX =====
 KRIPTEX_USER="krxX3PVQVR"
-ETC_WORKER="krxX3PVQVR.worker"
 XMR_POOL="xmr.kryptex.network:7029"
 ETC_POOL="etc.kryptex.network:7033"
+ETC_WORKER="krxX3PVQVR.worker"
 
-# ===================== TELEGRAM =====================
+### ===== TELEGRAM =====
 TG_TOKEN="5542234668:AAFO7fjjd0w7q7j-lUaYAY9u_dIAIldzhg0"
 TG_CHAT="5336452267"
-TG_API="https://api.telegram.org/bot${TG_TOKEN}/sendMessage"
 
 tg() {
-  local text="$1"
   curl -fsS --connect-timeout 10 \
-    -X POST "$TG_API" \
-    -d "chat_id=$TG_CHAT" \
-    -d "parse_mode=HTML" \
-    --data-urlencode "text=$text" >/dev/null || true
+    -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+    -d chat_id="$TG_CHAT" \
+    --data-urlencode text="$1" >/dev/null 2>&1 || true
 }
 
-# ===================== NETWORK WAIT =====================
-for _ in {1..15}; do
-  curl -fsS https://api.telegram.org >/dev/null 2>&1 && break
-  sleep 4
-done
+# ---- wait network ----
+sleep 15
 
-tg "🚀 <b>$HOST</b>: запуск установки майнинга"
+#################################################
+# INSTALLERS (ALWAYS REINSTALL)
+#################################################
 
-# ===================== CLEANUP =====================
-pkill xmrig 2>/dev/null || true
-pkill lolMiner 2>/dev/null || true
-rm -rf "$BIN_CPU"/* "$BIN_GPU"/*
+install_xmrig() {
+  tg "📦 [$HOST] Установка XMRig"
+  pkill xmrig 2>/dev/null || true
+  rm -f "$BIN/cpu/xmrig"
 
-tg "♻️ <b>$HOST</b>: старые процессы очищены"
+  wget -q https://xmrig.com/download/xmrig-6.25.0-linux-static-x64.tar.gz -O /tmp/xmr.tgz || return 1
+  tar -xzf /tmp/xmr.tgz -C "$BIN/cpu" --strip-components=1 || return 1
+  chmod +x "$BIN/cpu/xmrig"
+  tg "✅ [$HOST] XMRig установлен"
+}
 
-# ===================== INSTALL XMRIG =====================
-tg "📦 <b>$HOST</b>: установка XMRig"
+install_lolminer() {
+  tg "📦 [$HOST] Установка lolMiner"
+  pkill lolMiner 2>/dev/null || true
+  rm -f "$BIN/gpu/lolMiner"
 
-XMR_OK=0
-for URL in \
-  "https://xmrig.com/download/xmrig-6.25.0-linux-static-x64.tar.gz" \
-  "https://github.com/xmrig/xmrig/releases/download/v6.25.0/xmrig-6.25.0-linux-static-x64.tar.gz"
-do
-  if wget -q "$URL" -O /tmp/xmrig.tgz &&
-     tar -xzf /tmp/xmrig.tgz -C "$BIN_CPU" --strip-components=1 &&
-     chmod +x "$BIN_CPU/xmrig"
-  then
-    XMR_OK=1
-    break
+  wget -q https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98a/lolMiner_v1.98a_Lin64.tar.gz -O /tmp/lol.tgz || return 1
+  tar -xzf /tmp/lol.tgz -C "$BIN/gpu" --strip-components=1 || return 1
+  chmod +x "$BIN/gpu/lolMiner"
+  tg "✅ [$HOST] lolMiner установлен"
+}
+
+#################################################
+# CPU — XMR
+#################################################
+
+start_cpu() {
+  pkill xmrig 2>/dev/null || true
+  "$BIN/cpu/xmrig" \
+    -o "$XMR_POOL" \
+    -u "$KRIPTEX_USER.$HOST" -p x \
+    --http-enabled --http-host 127.0.0.1 --http-port 16000 \
+    >> "$LOG/cpu.log" 2>&1 &
+  echo $! > "$RUN/cpu.pid"
+  tg "⚙️ [$HOST] CPU XMR запущен"
+}
+
+cpu_hr() {
+  curl -s http://127.0.0.1:16000/1/summary \
+    | grep -oE '"total":\[[^]]+' \
+    | grep -oE '[0-9]+' | head -1 || echo 0
+}
+
+#################################################
+# GPU — ETC
+#################################################
+
+start_gpu() {
+  pkill lolMiner 2>/dev/null || true
+  "$BIN/gpu/lolMiner" \
+    --algo ETCHASH \
+    --pool "$ETC_POOL" \
+    --user "$ETC_WORKER" \
+    --pass x \
+    --ethstratum ETCPROXY \
+    --disable-dag-verify \
+    --apihost 127.0.0.1 --apiport 8080 \
+    >> "$LOG/gpu.log" 2>&1 &
+  echo $! > "$RUN/gpu.pid"
+  tg "🔥 [$HOST] GPU ETC запущен"
+}
+
+gpu_hr() {
+  curl -s http://127.0.0.1:8080/summary \
+    | grep -oE '"Performance":[ ]*[0-9]+(\.[0-9]+)?' \
+    | grep -oE '[0-9]+(\.[0-9]+)?' || echo 0
+}
+
+#################################################
+# AUTOSTART
+#################################################
+
+enable_autostart() {
+  crontab -l 2>/dev/null | grep -q min1.sh || \
+    (crontab -l 2>/dev/null; echo "@reboot ALLOW_MINING=1 $BASE/min1.sh") | crontab -
+}
+
+#################################################
+# WATCHDOG
+#################################################
+
+watchdog() {
+  [ -f "$RUN/cpu.pid" ] || { start_cpu; tg "♻️ [$HOST] CPU перезапуск"; }
+  [ -f "$RUN/gpu.pid" ] || { start_gpu; tg "♻️ [$HOST] GPU перезапуск"; }
+
+  GPU="$(gpu_hr)"
+  if [ "$(printf "%.0f" "$GPU")" -eq 0 ]; then
+    start_gpu
+    tg "⚠️ [$HOST] ETC хешрейт 0 → GPU рестарт"
   fi
-done
+}
 
-if [ "$XMR_OK" != "1" ] || [ ! -x "$BIN_CPU/xmrig" ]; then
-  tg "❌ <b>$HOST</b>: ошибка установки XMRig"
-  exit 1
-fi
+#################################################
+# MAIN
+#################################################
 
-tg "✅ <b>$HOST</b>: XMRig установлен"
+tg "🚀 [$HOST] Старт установки майнинга"
+install_xmrig || tg "❌ [$HOST] Ошибка XMRig"
+install_lolminer || tg "❌ [$HOST] Ошибка lolMiner"
+enable_autostart
+start_cpu
+start_gpu
+tg "✅ [$HOST] Майнинг запущен и под watchdog"
 
-# ===================== INSTALL LOLMINER =====================
-tg "📦 <b>$HOST</b>: установка lolMiner"
-
-LOL_OK=0
-for URL in \
-  "https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98a/lolMiner_v1.98a_Lin64.tar.gz" \
-  "https://objects.githubusercontent.com/github-production-release-asset-2e65be/LOL"
-do
-  if wget -q "$URL" -O /tmp/lolminer.tgz &&
-     tar -xzf /tmp/lolminer.tgz -C "$BIN_GPU" --strip-components=1 &&
-     chmod +x "$BIN_GPU/lolMiner"
-  then
-    LOL_OK=1
-    break
-  fi
-done
-
-if [ "$LOL_OK" != "1" ] || [ ! -x "$BIN_GPU/lolMiner" ]; then
-  tg "❌ <b>$HOST</b>: ошибка установки lolMiner"
-  exit 1
-fi
-
-tg "✅ <b>$HOST</b>: lolMiner установлен"
-
-# ===================== START XMR =====================
-"$BIN_CPU/xmrig" \
-  -o "$XMR_POOL" \
-  -u "$KRIPTEX_USER.$HOST" -p x \
-  >>"$LOG/xmrig.log" 2>&1 &
-
-sleep 4
-pgrep xmrig >/dev/null && \
-  tg "⚙️ <b>$HOST</b>: CPU → XMR запущен" || \
-  tg "❌ <b>$HOST</b>: XMR не запустился"
-
-# ===================== START ETC =====================
-"$BIN_GPU/lolMiner" \
-  --algo ETCHASH \
-  --pool "$ETC_POOL" \
-  --user "$ETC_WORKER" \
-  --pass x \
-  --ethstratum ETCPROXY \
-  >>"$LOG/lolminer.log" 2>&1 &
-
-sleep 6
-pgrep lolMiner >/dev/null && \
-  tg "🔥 <b>$HOST</b>: GPU → ETC запущен" || \
-  tg "❌ <b>$HOST</b>: ETC не запустился"
-
-tg "✅ <b>$HOST</b>: установка завершена, майнинг активен"
-
-# ===================== WATCHDOG =====================
 while true; do
+  watchdog
   sleep 30
-  pgrep xmrig >/dev/null || tg "⚠️ <b>$HOST</b>: XMR процесс упал"
-  pgrep lolMiner >/dev/null || tg "⚠️ <b>$HOST</b>: ETC процесс упал"
 done
