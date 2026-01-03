@@ -19,7 +19,7 @@ mkdir -p "$BIN/cpu" "$BIN/gpu" "$RUN" "$LOG"
 
 # ===== Kryptex =====
 KRIPTEX_USER="krxX3PVQVR"
-ETC_WORKER="krxX3PVQVR.worker"
+ETC_WORKER="krxX3PVQVR.$HOST"
 XMR_POOL="xmr.kryptex.network:7029"
 ETC_POOL="etc.kryptex.network:7033"
 
