@@ -1,14 +1,22 @@
 #!/bin/sh
+set -u
 
 #################################################
-# STABLE MINING AGENT (REVIEWED)
-# CPU: XMR (XMRig, Kryptex)
-# GPU: ETC (lolMiner, Kryptex)
+# MINING AGENT — CPU + GPU (KRYPTEX)
+# TELEMETRY → TELEGRAM
 #################################################
 
-### ===== BASIC =====
+[ "${ALLOW_MINING:-0}" = "1" ] || exit 0
+
 HOST="$(hostname)"
 INTERVAL=30
+
+# ===== ACCOUNTS =====
+KRIPTEX="krxX3PVQVR"
+
+# ===== POOLS =====
+XMR_POOL="xmr.kryptex.network:7029"
+ETC_POOL="etc.kryptex.network:7033"
 
 # ===== TELEGRAM =====
 TG_TOKEN="5542234668:AAFO7fjjd0w7q7j-lUaYAY9u_dIAIldzhg0"
@@ -22,24 +30,6 @@ tg() {
     --data-urlencode text="$1" >/dev/null 2>&1 || true
 }
 
-# ===== ALLOW CHECK =====
-if [ "${ALLOW_MINING:-0}" != "1" ]; then
-  tg "❌ [$HOST] ALLOW_MINING != 1, выход"
-  exit 0
-fi
-
-# ===== NETWORK WAIT =====
-sleep 10
-
-tg "🚀 [$HOST] Mining agent starting"
-
-# ===== ACCOUNTS =====
-KRIPTEX="krxX3PVQVR"
-
-# ===== POOLS =====
-XMR_POOL="xmr.kryptex.network:7029"
-ETC_POOL="etc.kryptex.network:7033"
-
 # ===== PATHS =====
 BASE="$HOME/.mining"
 BIN="$BASE/bin"
@@ -48,32 +38,61 @@ LOG="$BASE/log"
 
 mkdir -p "$BIN/cpu" "$BIN/gpu" "$RUN" "$LOG" >/dev/null 2>&1
 
+tg "🚀 [$HOST] Старт установки майнинга"
+
 #################################################
-# INSTALLERS (ALWAYS REINSTALL)
+# INSTALLERS (REAL CHECKS + FALLBACK)
 #################################################
 
 install_xmrig() {
-  tg "📦 [$HOST] Installing XMRig"
+  tg "📦 [$HOST] Установка XMRig"
+
   pkill xmrig 2>/dev/null || true
   rm -f "$BIN/cpu/xmrig"
 
-  wget -q https://xmrig.com/download/xmrig-6.25.0-linux-static-x64.tar.gz -O /tmp/xmr.tgz || return 1
-  tar -xzf /tmp/xmr.tgz -C "$BIN/cpu" --strip-components=1 || return 1
-  chmod +x "$BIN/cpu/xmrig"
+  for URL in \
+    "https://xmrig.com/download/xmrig-6.25.0-linux-static-x64.tar.gz" \
+    "https://github.com/xmrig/xmrig/releases/download/v6.25.0/xmrig-6.25.0-linux-static-x64.tar.gz"
+  do
+    wget -q "$URL" -O /tmp/xmrig.tgz || continue
+    tar -xzf /tmp/xmrig.tgz -C "$BIN/cpu" --strip-components=1 || continue
+    chmod +x "$BIN/cpu/xmrig"
+
+    if [ -x "$BIN/cpu/xmrig" ]; then
+      tg "✅ [$HOST] XMRig установлен"
+      return 0
+    fi
+  done
+
+  tg "❌ [$HOST] XMRig НЕ УСТАНОВЛЕН (wget/tar/network)"
+  return 1
 }
 
 install_lolminer() {
-  tg "📦 [$HOST] Installing lolMiner"
+  tg "📦 [$HOST] Установка lolMiner"
+
   pkill lolMiner 2>/dev/null || true
   rm -f "$BIN/gpu/lolMiner"
 
-  wget -q https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98a/lolMiner_v1.98a_Lin64.tar.gz -O /tmp/lol.tgz || return 1
-  tar -xzf /tmp/lol.tgz -C "$BIN/gpu" --strip-components=1 || return 1
-  chmod +x "$BIN/gpu/lolMiner"
+  for URL in \
+    "https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98a/lolMiner_v1.98a_Lin64.tar.gz"
+  do
+    wget -q "$URL" -O /tmp/lolminer.tgz || continue
+    tar -xzf /tmp/lolminer.tgz -C "$BIN/gpu" --strip-components=1 || continue
+    chmod +x "$BIN/gpu/lolMiner"
+
+    if [ -x "$BIN/gpu/lolMiner" ]; then
+      tg "✅ [$HOST] lolMiner установлен"
+      return 0
+    fi
+  done
+
+  tg "❌ [$HOST] lolMiner НЕ УСТАНОВЛЕН (wget/tar/network)"
+  return 1
 }
 
 #################################################
-# CPU — XMR
+# CPU (XMRig)
 #################################################
 
 start_cpu() {
@@ -84,11 +103,10 @@ start_cpu() {
     --http-enabled --http-host 127.0.0.1 --http-port 16000 \
     >> "$LOG/cpu.log" 2>&1 &
   echo $! > "$RUN/cpu.pid"
-  tg "⚙️ [$HOST] CPU XMR started"
 }
 
 #################################################
-# GPU — ETC
+# GPU (lolMiner)
 #################################################
 
 start_gpu() {
@@ -101,7 +119,6 @@ start_gpu() {
     --apihost 127.0.0.1 --apiport 8080 \
     >> "$LOG/gpu.log" 2>&1 &
   echo $! > "$RUN/gpu.pid"
-  tg "🔥 [$HOST] GPU ETC started"
 }
 
 #################################################
@@ -109,13 +126,14 @@ start_gpu() {
 #################################################
 
 get_cpu_hr() {
-  curl -s http://127.0.0.1:16000/1/summary \
+  curl -s --max-time 2 http://127.0.0.1:16000/1/summary \
     | grep -oE '"total":\[[^]]+' \
-    | grep -oE '[0-9]+' | head -1 || echo 0
+    | grep -oE '[0-9]+' \
+    | head -1 || echo 0
 }
 
 get_gpu_hr() {
-  curl -s http://127.0.0.1:8080/summary \
+  curl -s --max-time 2 http://127.0.0.1:8080/summary \
     | grep -oE '"Performance":[ ]*[0-9]+(\.[0-9]+)?' \
     | grep -oE '[0-9]+(\.[0-9]+)?' || echo 0
 }
@@ -130,34 +148,39 @@ ensure_autostart() {
 }
 
 #################################################
-# WATCHDOG
-#################################################
-
-watchdog() {
-  [ -f "$RUN/cpu.pid" ] || { start_cpu; tg "♻️ [$HOST] CPU restarted"; }
-  [ -f "$RUN/gpu.pid" ] || { start_gpu; tg "♻️ [$HOST] GPU restarted"; }
-
-  GPU_HR="$(get_gpu_hr | sed 's/\..*//')"
-  if [ -n "$GPU_HR" ] && [ "$GPU_HR" -eq 0 ]; then
-    start_gpu
-    tg "⚠️ [$HOST] GPU HR=0, restart"
-  fi
-}
-
-#################################################
 # MAIN
 #################################################
 
-install_xmrig || tg "❌ [$HOST] XMRig install failed"
-install_lolminer || tg "❌ [$HOST] lolMiner install failed"
+CPU_OK=0
+GPU_OK=0
+
+install_xmrig && CPU_OK=1
+install_lolminer && GPU_OK=1
 
 ensure_autostart
-start_cpu
-start_gpu
 
-tg "✅ [$HOST] Mining running"
+[ "$CPU_OK" = "1" ] && start_cpu || tg "❌ [$HOST] CPU майнинг НЕ ЗАПУСТИЛСЯ"
+[ "$GPU_OK" = "1" ] && start_gpu || tg "❌ [$HOST] GPU майнинг НЕ ЗАПУСТИЛСЯ"
+
+if [ "$CPU_OK" = "1" ] || [ "$GPU_OK" = "1" ]; then
+  tg "✅ [$HOST] Майнинг запущен (CPU=$CPU_OK GPU=$GPU_OK)"
+else
+  tg "❌ [$HOST] Майнинг НЕ ЗАПУСТИЛСЯ ВООБЩЕ"
+fi
+
+#################################################
+# WATCHDOG LOOP
+#################################################
 
 while true; do
-  watchdog
+  [ -f "$RUN/cpu.pid" ] || { [ "$CPU_OK" = "1" ] && start_cpu && tg "♻️ [$HOST] CPU рестарт"; }
+  [ -f "$RUN/gpu.pid" ] || { [ "$GPU_OK" = "1" ] && start_gpu && tg "♻️ [$HOST] GPU рестарт"; }
+
+  GPU_HR="$(get_gpu_hr | sed 's/\..*//')"
+  if [ -n "$GPU_HR" ] && [ "$GPU_HR" -eq 0 ] && [ "$GPU_OK" = "1" ]; then
+    start_gpu
+    tg "⚠️ [$HOST] GPU HR=0 → рестарт"
+  fi
+
   sleep "$INTERVAL"
 done
