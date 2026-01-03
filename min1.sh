@@ -13,7 +13,7 @@ TG_CHAT_ID="5336452267"
 TG_API="https://api.telegram.org/bot$TG_TOKEN/sendMessage"
 
 # ===== MINING CONFIG =====
-[ "${ALLOW_MINING:-0}" = "1" ] || exit 0
+
 
 # ===== ACCOUNTS =====
 KRIPTEX="krxX3PVQVR"
