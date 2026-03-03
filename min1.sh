@@ -19,7 +19,7 @@ XMR_POOL="xmr.kryptex.network:7029"
 ETC_POOL="etc.kryptex.network:7033"
 
 # ===== TELEGRAM =====
-TG_TOKEN="5542234668:AAFO7fjjd0w7q7j-lUaYAY9u_dIAIldzhg0"
+TG_TOKEN="8415540095:AAFPXWwJt7dwzyg-JLc0e5U3I5mOHzzAfb4"
 TG_CHAT="5336452267"
 TG_API="https://api.telegram.org/bot${TG_TOKEN}/sendMessage"
 
