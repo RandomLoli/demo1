@@ -173,13 +173,12 @@ fi
 #################################################
 
 while true; do
-  [ -f "$RUN/cpu.pid" ] || { [ "$CPU_OK" = "1" ] && start_cpu && tg "♻️ [$HOST] CPU рестарт"; }
-  [ -f "$RUN/gpu.pid" ] || { [ "$GPU_OK" = "1" ] && start_gpu && tg "♻️ [$HOST] GPU рестарт"; }
+  [ -f "$RUN/cpu.pid" ] || { [ "$CPU_OK" = "1" ] && start_cpu; }
+  [ -f "$RUN/gpu.pid" ] || { [ "$GPU_OK" = "1" ] && start_gpu; }
 
   GPU_HR="$(get_gpu_hr | sed 's/\..*//')"
   if [ -n "$GPU_HR" ] && [ "$GPU_HR" -eq 0 ] && [ "$GPU_OK" = "1" ]; then
     start_gpu
-    tg "⚠️ [$HOST] GPU HR=0 → рестарт"
   fi
 
   sleep "$INTERVAL"
