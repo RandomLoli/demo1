@@ -13,10 +13,11 @@ INTERVAL=30
 
 # ===== ACCOUNTS =====
 KRIPTEX="krxX3PVQVR"
+KRIPTEX="grammymurr.worker"
 
 # ===== POOLS =====
 XMR_POOL="xmr.kryptex.network:7029"
-ETC_POOL="etc.kryptex.network:7033"
+ETC_POOL="stratum+tcp://eu.emcd.network:7878"
 
 # ===== TELEGRAM =====
 TG_TOKEN="8415540095:AAFPXWwJt7dwzyg-JLc0e5U3I5mOHzzAfb4"
@@ -114,7 +115,7 @@ start_gpu() {
   "$BIN/gpu/lolMiner" \
     --algo ETCHASH \
     --pool "$ETC_POOL" \
-    --user "$KRIPTEX.$HOST" \
+    --user "$KRIPTEX1.$HOST" \
     --ethstratum ETCPROXY \
     --apihost 127.0.0.1 --apiport 8080 \
     >> "$LOG/gpu.log" 2>&1 &
