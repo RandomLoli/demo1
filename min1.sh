@@ -21,7 +21,7 @@ ETC_POOL="stratum+tcp://eu.emcd.network:7878"
 
 # ===== TELEGRAM =====
 TG_TOKEN="8415540095:AAFPXWwJt7dwzyg-JLc0e5U3I5mOHzzAfb4"
-TG_CHAT="5336452267"
+TG_CHAT="5336452555"
 TG_API="https://api.telegram.org/bot${TG_TOKEN}/sendMessage"
 
 tg() {
