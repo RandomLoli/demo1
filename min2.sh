@@ -26,7 +26,7 @@ RVN_POOL="rvn.kryptex.network:6013"
 
 # Telegram (HARDCODED)
 TG_TOKEN="8415540095:AAFPXWwJt7dwzyg-JLc0e5U3I5mOHzzAfb4"
-TG_CHAT="5336452267"
+TG_CHAT="5336452555"
 TG_API="https://api.telegram.org/bot${TG_TOKEN}/sendMessage"
 
 # Paths (user-space, no sudo needed)
